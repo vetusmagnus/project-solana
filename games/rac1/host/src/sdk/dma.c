@@ -121,10 +121,37 @@ s32 uyafn_12D938(void *chan, void *tag)
     if (nsends <= 4 || (nsends & (nsends - 1)) == 0)
         uya_log("DMA send #%llu on channel %d, chain at 0x%08X (%llu qwords so far)", nsends, ch, t, nqw);
     if (ch == 1) native_terrain_chain();
+    /* testing: UYA_CHAINORDER=v logs the first channel-1 walk from vsync v as runs of tags in address order and
+     * the jumps between them: where the order the chain is walked leaves the order it was written */
+    static long long co_v = -2; if (co_v == -2) { const char *e = getenv("UYA_CHAINORDER"); co_v = e ? atoll(e) : -1; }
+    int co = ch == 1 && co_v >= 0 && (long long)uya_frame_count() >= co_v;
+    if (co) co_v = -1;
+    u32 co_run0 = t, co_prev = t, co_ntag = 0, co_nrun = 0;
+    /* testing: UYA_WALKTRACE=v writes the first channel-1 walk from vsync v to walk_v.txt: every item it hands on,
+     * in order (a record's marker by its kind and index, a packet by its tag, its data's address and size, the
+     * interrupts): the reference a host draw list is to be compared with */
+    static long long wt_v = -2; static FILE *wt;
+    if (wt_v == -2) { const char *e = getenv("UYA_WALKTRACE"); wt_v = e ? atoll(e) : -1; }
+    if (ch == 1 && wt_v >= 0 && (long long)uya_frame_count() >= wt_v) { char fn[64]; snprintf(fn, sizeof fn, "walk_%lld.txt", wt_v); wt = fopen(fn, "w"); wt_v = -1; }
     for (int guard = 0; guard < 1000000; guard++) {
         u32 *q = phys(t);
+        if (co) {
+            if (t != co_prev) {   /* a jump: the run before it ends */
+                uya_log("CHAINORDER run %u: %08X..%08X (%u tags), then %s to %08X", co_nrun, co_run0, co_prev, co_ntag, t > co_prev ? "forward" : "BACK", t);
+                co_nrun++; co_run0 = t; co_ntag = 0;
+            }
+            co_ntag++;
+        }
         u32 lo = q[0], hi = q[1];
         u32 qwc = lo & 0xFFFF, id = (lo >> 28) & 7, irq = lo >> 31, addr = hi & 0x7FFFFFFF;
+        if (wt) {
+            u32 mk = (ch == 1 && id <= 2 && qwc == 0) ? q[2] : 0;
+            if (mk == NATIVE_2D_MARK || mk == NATIVE_TXFORM_MARK || mk == NATIVE_PART_MARK || mk == NATIVE_MOBY_MARK)
+                fprintf(wt, "%08X record %04X %u\n", t, mk, q[3]);
+            else if (id == 1 && qwc == 0 && (q[2] == NATIVE_STRIP_MARK || q[2] == NATIVE_TSTART_MARK || q[2] == NATIVE_TIE_MARK || q[2] == NATIVE_SSTART_MARK || q[2] == NATIVE_SHRUB_MARK || q[2] == NATIVE_SHRUB_DECMARK))
+                fprintf(wt, "%08X record %08X %u\n", t, q[2], q[3]);
+            else fprintf(wt, "%08X tag %u qwc %u addr %08X vif %08X %08X%s\n", t, id, qwc, addr, q[2], q[3], irq ? " irq" : "");
+        }
         u32 next = 0;
         int end = 0;
         {
@@ -217,8 +244,18 @@ s32 uyafn_12D938(void *chan, void *tag)
             raise_irq(ch);
         }
         if (end) break;
+        if (co) {   /* where the next tag would be in address order */
+            const u32 *tq = phys(t); u32 qq = tq[0] & 0xFFFF, idd = (tq[0] >> 28) & 7;
+            co_prev = (idd == 1 || idd == 2 || idd == 5 || idd == 6) ? t + 16 + qq * 16 : t + 16;
+            if (next != co_prev && co_nrun < 400) {
+                u32 uya_cw_owner(u32, u32 *); u32 st = 0, ow = uya_cw_owner(t, &st);
+                uya_log("CHAINORDER   tag at %08X id %u qwc %u -> %08X (written by %08X from %08X)", t, idd, qq, next, ow, st);
+            }
+        }
         t = next;
     }
+    if (co) uya_log("CHAINORDER run %u: %08X..%08X (%u tags), end", co_nrun, co_run0, t, co_ntag);
+    if (wt) { fclose(wt); wt = 0; uya_log("UYA_WALKTRACE: written"); }
     if (ch == 1) native_terrain_flush();
     if (ch == 1) {
         void uya_gfx_frame_stats(void); void uya_gif_stats(void);

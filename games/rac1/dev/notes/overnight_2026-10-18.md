@@ -584,3 +584,35 @@ then the walker gone): first the uploads, the bulk of what still goes through th
   levels 1, 3, 9, 13 walking, 0 px; level 3 with UYA_LAZYVRAM=0 as well, 0 px. Software, all 19 levels
   (UYA_NTEXALIAS=0 UYA_LAZYVRAM=0 vs default; both are GL-only, so this checks the software path is
   untouched): 0 px (level 11 differed in the parallel run, 0 px alone).
+
+## The host draw list: what the walker still does, and the plan (19 October, night)
+
+Goal: the frame drawn from a host list the producers fill, the DMA chain walker kept beside it as the
+check (the same items in the same order, frame by frame) and then removed.
+
+Measured (level 3, software, walking; testing aids in sdk/dma.c):
+- UYA_WALKTRACE=v writes the walker's items for the first channel-1 walk from vsync v to walk_v.txt: a
+  record's marker (kind, index), a packet's tag (id, qwc, address, VIF words), interrupts. One frame
+  (vsync 1450): 694 items: 365 records (263 2D/upload, 79 tie, shrub, strip, moby, transform,
+  particle), 118 NEXT links and an END, and 212 data packets: 64 REF + DIRECT (GIF state tables: the
+  draw environment, setup blocks), ~67 REF + UNPACK into VU memory and 29 CNT + MSCAL (the effect and
+  clip producers whose VU programs are native but still take their input from VU memory), the rest
+  NOP/FLUSHA. UYA_VIFSTATS over vsyncs 1450-1650, per send: 61 MSCAL, ~12,800 words of UNPACK, ~9,200 of
+  MPG, ~1,000 of DIRECT.
+- UYA_CHAINORDER=v logs that walk's jumps (with UYA_CWATCH in the chain-watch tree: who wrote each link
+  tag; cwatch.c uya_cw_owner). The walk is not the write order: subsystems build their part aside and a
+  reserved NEXT links it in, and their links come from a handful of routines: TieProc (80 a frame,
+  linking its classes), ShrubProc (11), the shrub texture splice (func_00229C08), the sky
+  (func_0022C7E0, func_0022C870), the tfrag pair (func_002344D8, func_002346C0), the tie setup
+  (func_00236CA8), the mobys' routines, and the frame's own routines (func_001F2xxx-func_001F4748)
+  that put the subsystems in their fixed order.
+
+Plan:
+A. Nothing but records and links through the walker: the GIF state tables (REF + DIRECT) as records
+   at their writers (as the screen clear and the frame copy), then the VU-fed producers (their UNPACK
+   and MSCAL data as records, as the uploads were).
+B. A host list mirroring the links: each producer appends its records to its subsystem's segment; the
+   link writers above link segments; the frame's routines give the order. Check mode: the host list
+   against the walker's trace, item by item, each frame.
+C. The walker removed; the DMA interrupt the game's chain sync waits on becomes a host event (frame
+   submitted).

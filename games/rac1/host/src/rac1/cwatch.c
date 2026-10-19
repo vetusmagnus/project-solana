@@ -51,6 +51,14 @@ void rc_cw_post(u32 s, u32 target, u32 site, u32 before)
         if (stamp[q] < s) { stamp[q] = t; own[q][0] = target; own[q][1] = site; }
 }
 u32 rc_cw_word(void) { if (on < 0) init(); return on && cwa ? M32(cwa) : 0; }
+/* who wrote the chain qword at addr (the called address and the call's place), or 0 */
+u32 uya_cw_owner(u32 addr, u32 *site)
+{
+    if (on <= 0) return 0;
+    u32 a = addr & 0x1FFFFFFu;
+    if (site) *site = own[a >> 4][1];
+    return own[a >> 4][0];
+}
 
 typedef struct { u32 target, site, tag0, tag1, tag2, tag3; unsigned long long pk, qw, kicks; } Ent;
 static Ent ent[512]; static int nent;

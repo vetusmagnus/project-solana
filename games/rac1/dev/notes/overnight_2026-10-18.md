@@ -528,3 +528,59 @@ then the walker gone): first the uploads, the bulk of what still goes through th
   missing, and the old one did not know op 21 (it drops the rest of the draw list); it now always
   builds it. (The item 2 and 3 GPU checks above had a current replay tool: gl_replay_ab.sh, which always
   builds it, ran first in the same job.)
+
+## Item 4 continued: the rest of the uploads, and GS memory as a derived store (19 October, evening)
+
+- The rest of the uploads: the executable's copies of the upload list's sender (func_0020C2F8) and of
+  BuildTfragTextureDma (func_00236060) hooked too (the boot screens); the strip setup's animated
+  texture (native_stripd.c, an IMAGE packet replayed as GIF data) and the GS library's
+  sceGsExecLoadImage (gsdk.c, a GIF packet the host built itself) now give their data as host uploads
+  (gs.c uya_gs_upload, op 21). Level 3, a whole run: the IMAGE data through the GIF from 41.0 M qwords
+  (UYA_NUPL=0) to 57,348: four packets at vsync 16, the boot program's first screen (its own chain,
+  built before the game; once).
+- GS memory as a derived store (gs.c, UYA_LAZYVRAM; GL only): an upload the store keeps (urec: PSMT8
+  or PSMCT32 at 0,0) is no longer written into GS memory as it arrives; its pixels are the texture.
+  GS memory is filled in, upload by upload in their order, only for the blocks something reads or
+  writes there other than through the uploads: a texture or palette decoded from GS memory (the
+  texture's own blocks), a transfer's other side, a GPU target's page sync, a readback, the host's
+  image write, a snapshot (GS recording, VRAM save), a store slot reused. An upload a later one covers
+  block for block is dropped. One whose data comes by the per-pixel path, or that is left unfinished,
+  is written at once (its pixels so far). The software renderer (the reference, drawing in GS memory)
+  keeps the eager writes.
+- Level 3 on the GPU, a whole run: 65,537 uploads kept out of GS memory; 38,103 dropped (covered by a
+  later upload) and never written; 27,057 written in when needed: 26,171 for textures decoded from GS
+  memory (the fallback cases piece 5 found: the stale TBP, mip levels with no upload of their own,
+  textures read at another size or format than uploaded), 630 slots reused, 256 GPU target syncs.
+- First versions wrote too much (35,406, then 28,041): a texture's whole page span, and pages as the
+  unit of overlap; now blocks, and a texture's own.
+- Checks: GL replays, UYA_LAZYVRAM=0 vs default: levels 3 and 13 from vsync 0 to 1000 (boot, level
+  load, gameplay) 0 px; levels 1, 3, 9, 13 walking 0 px. Uploads, UYA_NUPL=0 vs default: software all
+  19 levels 0 px (two levels differed in the parallel run, 0 px alone); GPU levels 1, 3, 9, 13 0 px.
+- Where item 4 stands: the uploads are host records (none through the chain's data or the GIF but the
+  boot program's first screen); in GL, GS memory only receives the uploads something reads it for (41%
+  of them on level 3); textures are still named by address and validated by which blocks were written
+  since (the store's urec_find), and the fallback cases still read GS memory. Next: those fallback
+  cases (each needs the PS2's layout of the memory to be reproduced on purpose or given up), then the
+  host draw list.
+
+## Item 4: the textures still read from GS memory (19 October, night)
+
+- What they are (level 3 on the GPU, UYA_NTEXWHY, per vsync, of ~3,500 lookups): 30-40 go to GS memory:
+  11-12 at TBP 0 (distant mip chains whose level 0 points at the frame buffer; GL leaves them out unless
+  the batch's LOD range reaches them), 4-15 with no upload starting there (a TEX0 asking for levels the
+  streamer did not upload this frame), 1-7 over an upload of another size (a 128x128 texture over this
+  frame's 64x64 upload), 1-5 over an upload written over since, 2-4 in another format.
+- The other format was one case: a 64x64 PSMCT32 upload read as PSMCT24 with TBW 0 (rows 32-63 of the
+  texture are rows 0-31 again on the GS). Now decoded from the upload by address (gs.c urec_alias32,
+  UYA_NTEXALIAS=0: from GS memory): texel (x, y) is the upload's pixel stored at the same word; any texel
+  outside the upload's words and GS memory decides. PSMCT24's alpha from TEXA as before (TEXA is in the
+  cache key). UYA_NTEXCHECK on the GPU: no texture from an upload differs from GS memory.
+- The rest are the PS2 showing what is in memory: bytes of other textures, read in another layout,
+  where the game's TEX0 is ahead of or behind the streamer (piece 5: 0-774 px per level depend on them).
+  Reproducing them exactly is reproducing GS memory there; the derived store (above) does it only for
+  the blocks such a texture reads, from the uploads in their order. Giving them up would change those
+  pixels (the PS2's brief glitches) and break the exactness rule, so they stay.
+- Checks: GL replays, UYA_NTEXALIAS=0 vs default: levels 3 and 13 boot to gameplay (vsyncs 0-1000), 0 px;
+  levels 1, 3, 9, 13 walking, 0 px; level 3 with UYA_LAZYVRAM=0 as well, 0 px. Software, all 19 levels
+  (UYA_NTEXALIAS=0 UYA_LAZYVRAM=0 vs default; both are GL-only, so this checks the software path is
+  untouched): 0 px (level 11 differed in the parallel run, 0 px alone).

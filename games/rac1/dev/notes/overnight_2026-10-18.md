@@ -284,3 +284,22 @@ from EE code). Research on each producer: piece7_research.md.
   sources, ~6 a send) and DIRECT; no UNPACK, MSCAL, STCYCL, STMOD, STMASK, STROW/STCOL, BASE or OFFSET.
 - Still on the full VIF: the boot screens (11 command kinds logged once at vsync ~177), and the software
   renderer's paths (it draws terrain and mobys from VU memory, so their chains still go through the VIF).
+
+## The boot screens off the full VIF (19 October, morning)
+
+- Cause: native_terrain.c found the tfrag table by the level's id (0x16100C on levels 0, 5, 14, 16, else
+  0x160FCC). Before a level program is loaded the executable's TfragProc reads its own (0x160F8C, templates
+  0x160A80), so the boot screens had no meshes and their terrain went to the VU1 through the chain (the
+  template, MSCAL, the tfrag packets: STROW, STMOD, STMASK, V3-16 / V4-8 unpacks).
+- Fix: TfragProc tells the terrain where it reads the table, the count and its templates t4..t7
+  (native_terrain_where, from its own gp references); the meshes are built there, at once when the place
+  is new (boot, a level loaded) so the first frame already draws directly. UYA_NTERRWHERE=0: the old
+  lookup by level id (testing).
+- Checks: every level's reported addresses equal the old per-level constants. GPU census from boot to the
+  level: no command reached the full VIF (vsyncs 170-290: NOP, FLUSH, FLUSHA, MPG, DIRECT only). Software,
+  19 levels, native terrain vs UYA_NTERRAIN=0: 0 px (level 15 differed in runs overlapping another
+  session's build; alone, 0 px). Software boot frames (vsyncs 170-260): 0 px. GL gameplay, levels 3, 14, 15,
+  new vs old lookup: 0 px.
+- GL boot frames, native terrain vs the VU1 path: 2,680 px over 89 frames (about 38 a frame). Not from this
+  change: the GPU terrain meshes are not bit-exact with the VU program (gameplay, level 3, the same A/B:
+  59,779 px over 79 frames). The boot screens used to avoid it only by going through the VIF.

@@ -71,6 +71,20 @@ static unsigned long long n_mesh[32], n_vu[32], n_chains;   /* (statistics by mo
 static Tf *tf; static u32 ntf;
 static u32 sig_tbl, sig_cnt, sig_sum; static const void *sig_lvl;
 static u32 t_addr;
+static u32 rep_tbl, rep_cnt, rep_t4;         /* where TfragProc reads the table and the templates (native_terrain_where) */
+static void terrain_sync(void);
+void native_terrain_where(u32 tbl_word, u32 cnt_word, u32 t4)
+{
+    static int use = -1;   /* UYA_NTERRWHERE=0: by the level's layout only (as before; the boot screens' terrain then goes to the VU1) */
+    if (use < 0) { const char *e = getenv("UYA_NTERRWHERE"); use = !(e && !atoi(e)); }
+    if (!use) return;
+    int moved = tbl_word != rep_tbl || cnt_word != rep_cnt || t4 != rep_t4;
+    if (moved) uya_log("native terrain: TfragProc reads the tfrag table at %08X (count %08X), its templates at %08X", tbl_word, cnt_word, t4);
+    rep_tbl = tbl_word; rep_cnt = cnt_word; rep_t4 = t4;
+    /* a new place (boot, a level loaded) or nothing built yet: the meshes now, so this first run finds
+     * them (no chain draw of the previous table is pending then); other changes wait for the chain */
+    if (on > 0 && (moved || !tf)) terrain_sync();
+}
 static int all_ok;                          /* every level of detail of every tfrag has its meshes */                          /* the level's tag templates t4..t7 (their VIF codes) */
 
 /* packet start address -> tfrag * 2 + (0: the LOD2 packet, 1: the common packet) */
@@ -268,11 +282,22 @@ void native_terrain_chain(void)
         line[o] = 0;
         uya_log("native terrain: draws as meshes by mode:%s; straight from TfragProc %llu (%llu failed)", line, n_direct, n_direct_bad);
     }
+    terrain_sync();
+}
+/* the meshes for the table as it is now: built when the table (or where it is read) changed */
+static void terrain_sync(void)
+{
+    /* the table and the templates where TfragProc (the level's copy, or the executable's before a level
+     * program is loaded: the boot screens) reads them; until it has run, by the level's layout */
     const rac1_level_t *lv = rac1_current_level();
-    if (!lv) { if (tf) drop_all(); return; }
-    int hi = lv->id == 0 || lv->id == 5 || lv->id == 14 || lv->id == 16;
-    u32 tb = hi ? 0x16100Cu : 0x160FCCu;
-    u32 tbl = rd32(tb), cnt = rd32(tb + 4), sum = 0;
+    u32 tbw, cnw, ta;
+    if (rep_tbl) { tbw = rep_tbl; cnw = rep_cnt; ta = rep_t4; }
+    else {
+        if (!lv) { if (tf) drop_all(); return; }
+        int hi = lv->id == 0 || lv->id == 5 || lv->id == 14 || lv->id == 16;
+        tbw = hi ? 0x16100Cu : 0x160FCCu; cnw = tbw + 4; ta = hi ? 0x160B00u : 0x160AC0u;
+    }
+    u32 tbl = rd32(tbw), cnt = rd32(cnw), sum = 0;
     int valid = cnt && cnt <= 4096 && tbl >= 0x100000u && tbl + cnt * 64 <= 0x2000000u && !(tbl & 15);
     if (valid)
         for (u32 i = 0; i < cnt; i++) {
@@ -281,10 +306,10 @@ void native_terrain_chain(void)
             sum = sum * 31 + d;
         }
     if (!valid) { if (tf) drop_all(); sig_lvl = 0; return; }
-    if (lv == sig_lvl && tbl == sig_tbl && cnt == sig_cnt && sum == sig_sum) return;
+    if (lv == sig_lvl && tbl == sig_tbl && cnt == sig_cnt && sum == sig_sum && ta == t_addr) return;
     drop_all();
     sig_lvl = lv; sig_tbl = tbl; sig_cnt = cnt; sig_sum = sum;
-    t_addr = hi ? 0x160B00u : 0x160AC0u;
+    t_addr = ta;
     tf = calloc(cnt, sizeof *tf); ntf = cnt;
     u32 nok = 0, nverts = 0;
     for (u32 i = 0; i < cnt; i++) {
@@ -296,7 +321,7 @@ void native_terrain_chain(void)
         hput(t->data + rd16(t->hdr + 0x16), i * 2 + 1);
     }
     all_ok = nok == cnt * 3;
-    uya_log("native terrain: level %d, %u tfrags, %u of %u levels of detail made meshes (%u vertices)", lv->id, cnt, nok, cnt * 3, nverts);
+    uya_log("native terrain: level %d, %u tfrags, %u of %u levels of detail made meshes (%u vertices)", lv ? lv->id : -1, cnt, nok, cnt * 3, nverts);
 }
 
 /* ---- draws from the native TfragProc: segments (runs of draws), each named by a marker ---- */

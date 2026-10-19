@@ -1895,6 +1895,87 @@ static void survey_report(void)
     for (int j = 0; j < SV_T; j++) sv_tex[j].nper = 0;
     memset(sv_cls_n, 0, sizeof sv_cls_n); memset(sv_cls_u, 0, sizeof sv_cls_u); memset(sv_clut, 0, sizeof sv_clut); sv_epoch++;
 }
+
+/* ---- testing: UYA_GSCENSUS=a,b (best with UYA_MTGS=0) ----
+ * What the draws ask of the GS, by source (the GIF/draw-list source name), from vsync a to b: primitives
+ * (vertex kicks) and native mesh triangles, the share of them using each GS feature, the distinct
+ * materials (the draw state less addresses and scissor), blend equations and targets; transfers by
+ * direction. For scoping a renderer that takes native draws without the GS model. */
+enum { CF_TME, CF_PAL, CF_MIP, CF_LIN, CF_REGION, CF_FST, CF_FOG, CF_ABE, CF_BLENDX, CF_ATE, CF_AFAIL, CF_DATE, CF_NOZT,
+       CF_ZMSK, CF_FBA, CF_FBMSK, CF_NOCLAMP, CF_F16, CF_RT, CF_NOUP, CF_TFX, CF_N };
+static const char *const cf_name[CF_N] = { "texture", "paletted", "mipmapped", "bilinear", "region clamp/repeat", "UV (FST)",
+    "fog", "blend", "blend not Cs-Cd*As+Cd", "alpha test", "alpha test keeps FB/Z", "destination alpha test", "no Z test",
+    "no Z write", "FBA", "frame mask", "colour clamp off", "16-bit target", "texture is a render target", "texture not an intact upload",
+    "TFX not modulate" };
+#define CS_N 48
+#define CH_N 512
+typedef struct { const char *src; u64 prims, tris, draws, f[CF_N]; u32 mat[CH_N], nmat; } census_src_t;
+static census_src_t cs[CS_N]; static int ncs;
+static long cs_a = -2, cs_b;
+static u32 cs_blend[64], cs_nblend, cs_tgt[64], cs_ntgt;
+static u64 cs_trx[3], cs_trx_bytes[3];
+static int census_on(void)
+{
+    if (cs_a == -2) { const char *e = getenv("UYA_GSCENSUS"); cs_a = -1; if (e) sscanf(e, "%ld,%ld", &cs_a, &cs_b); }
+    if (cs_a < 0) return 0;
+    long f = (long)uya_frame_count();
+    return f >= cs_a && f < cs_b;
+}
+static void cs_put(u32 *set, u32 *n, u32 cap, u32 v) { for (u32 i = 0; i < *n; i++) if (set[i] == v) return; if (*n < cap) set[(*n)++] = v; }
+static void census_add(const pcmd_t *S, u32 n, int mesh)
+{
+    if (!census_on()) return;
+    int i;
+    for (i = 0; i < ncs; i++) if (cs[i].src == gs_src_int || !strcmp(cs[i].src, gs_src_int)) break;
+    if (i == ncs) { if (ncs == CS_N) i = CS_N - 1; else { cs[ncs].src = gs_src_int; ncs++; } }
+    census_src_t *c = &cs[i];
+    if (mesh) { c->tris += n; c->draws++; } else c->prims += n;
+    u32 psm = BITS(S->tex0, 20, 6);
+    int up = 1;
+    if (S->tme && !S->rt && (psm == 0x13 || psm == 0x00)) {
+        u32 tw = 1u << BITS(S->tex0, 26, 4), th = 1u << BITS(S->tex0, 30, 4);
+        up = urec_find(psm, BITS(S->tex0, 0, 14), BITS(S->tex0, 14, 6), tw > 1024 ? 1024 : tw, th > 1024 ? 1024 : th) != 0;
+    }
+    int on[CF_N] = { S->tme, S->tme && (psm == 0x13 || psm == 0x1B || psm == 0x14 || psm == 0x24 || psm == 0x2C), S->tme && S->mmin >= 2 && S->mxl > 0,
+        S->tme && (S->mmag || (S->mmin & 1)), S->tme && (S->wms >= 2 || S->wmt >= 2), S->tme && S->fst, S->fge, S->abe,
+        S->abe && !(S->ba == 0 && S->bb == 1 && S->bc == 0 && S->bd == 1), S->ate && S->atst != 1, S->ate && S->atst != 1 && S->afail != 0,
+        S->date, S->ztst == 1, S->zmsk, S->fba, S->fbmsk != 0, !S->clampc, S->fpsm != 0 && S->fpsm != 1, S->tme && S->rt, S->tme && !up, S->tme && S->tfx != 0 };
+    for (int k = 0; k < CF_N; k++) if (on[k]) c->f[k] += n;
+    /* the material: state less the addresses (texture, frame, Z), scissor and texture size */
+    u32 h = 2166136261u;
+    u32 m[] = { S->tme, S->fge, S->abe, S->fst, S->iip, S->ate, S->atst, S->afail, S->zte, S->ztst, S->zmsk, S->ba, S->bb, S->bc, S->bd,
+                S->tfx, S->tcc, S->fba, S->clampc, S->mxl > 0, S->mmag, S->mmin, S->wms, S->wmt, S->date, S->datm, S->aref, S->fix,
+                S->fpsm, S->zpsm, S->fbmsk, S->tme ? psm : 99, S->rt != 0 };
+    for (u32 k = 0; k < sizeof m / 4; k++) h = (h ^ m[k]) * 16777619u;
+    cs_put(c->mat, &c->nmat, CH_N, h);
+    if (S->abe) cs_put(cs_blend, &cs_nblend, 64, S->ba | S->bb << 2 | S->bc << 4 | S->bd << 6 | (u32)S->fix << 8);
+    cs_put(cs_tgt, &cs_ntgt, 64, S->fbp | S->fpsm << 14 | S->fbw << 20 | (S->zte ? 1u << 31 : 0));
+}
+static void census_trx(u32 dir, u32 bytes) { if (dir < 3 && census_on()) { cs_trx[dir]++; cs_trx_bytes[dir] += bytes; } }
+static void census_vsync(void)
+{
+    if (cs_a < 0 || (long)uya_frame_count() != cs_b) return;
+    double k = (double)(cs_b - cs_a);
+    u64 tp = 0, tt = 0; for (int i = 0; i < ncs; i++) { tp += cs[i].prims; tt += cs[i].tris; }
+    uya_log("GS census from vsync %ld to %ld, per vsync: %.0f primitives (vertex kicks), %.0f mesh triangles; %u blend equations, %u targets",
+            cs_a, cs_b, tp / k, tt / k, cs_nblend, cs_ntgt);
+    for (int pass = 0; pass < ncs; pass++) {
+        int b = -1;
+        for (int i = 0; i < ncs; i++) if (cs[i].src && (b < 0 || cs[i].prims + cs[i].tris > cs[b].prims + cs[b].tris)) b = i;
+        if (b < 0) break;
+        census_src_t *c = &cs[b]; u64 n = c->prims + c->tris;
+        char line[1024]; int o = 0;
+        for (int f = 0; f < CF_N; f++) if (c->f[f]) o += snprintf(line + o, sizeof line - o, "%s%s %.0f%%", o ? ", " : "", cf_name[f], 100.0 * c->f[f] / n);
+        line[o] = 0;
+        uya_log("  %-26s %8.0f prims %8.0f mesh tris (%6.0f mesh draws), %3u materials: %s", c->src, c->prims / k, c->tris / k, c->draws / k, c->nmat, line);
+        c->src = 0;
+    }
+    for (int i = 0; i < (int)cs_nblend; i++) uya_log("    blend (A %u - B %u) * C %u + D %u, FIX %u", cs_blend[i] & 3, cs_blend[i] >> 2 & 3, cs_blend[i] >> 4 & 3, cs_blend[i] >> 6 & 3, cs_blend[i] >> 8);
+    for (int i = 0; i < (int)cs_ntgt; i++) uya_log("    target FBP %04X PSM %02X FBW %u%s", cs_tgt[i] & 0x3FFF, cs_tgt[i] >> 14 & 63, cs_tgt[i] >> 20 & 63, cs_tgt[i] >> 31 ? ", Z" : "");
+    uya_log("  transfers per vsync: to GS memory %.1f (%.0f KB), back to the EE %.2f (%.0f KB), within GS memory %.2f (%.0f KB)",
+            cs_trx[0] / k, cs_trx_bytes[0] / k / 1024, cs_trx[1] / k, cs_trx_bytes[1] / k / 1024, cs_trx[2] / k, cs_trx_bytes[2] / k / 1024);
+    if (gsgl_on) gsgl_stats((int)k);
+}
 /* memcmp of two commands (cmd_setup zeroes the padding), a word at a time */
 static inline int cmd_same(const pcmd_t *a, const pcmd_t *b)
 {
@@ -1957,6 +2038,7 @@ static void vertex_kick(u32 X, u32 Y, u32 Z, u8 F, int draw)
             st_dirty = 0; st_tme = ns.tme; st_epoch = dirty_epoch;
         }
         pc.st = s_head - 1;
+        census_add(&sring[pc.st % SN], 1, 0);
         {
             static const u8 nvk[8] = {1, 2, 2, 3, 3, 3, 2, 1};
             float ym = vq[0].y;
@@ -2053,8 +2135,10 @@ static void trx_finish(void)
     up_rec[i].key = key; up_rec[i].hash = trx_hash; up_rec[i].sum = pages_sum(trx_rbp, trx_rn); up_rec[i].used = 1;
 }
 
+static void census_trx(u32 dir, u32 bytes);
 static void trx_start(u32 dir)
 {
+    census_trx(dir, BITS(trxreg, 0, 12) * BITS(trxreg, 32, 12) * trx_bits(dir == 1 ? BITS(bitbltbuf, 24, 6) : BITS(bitbltbuf, 56, 6)) / 8);
     {   /* wait for queued draws only if they write what this reads or writes */
         u32 dbp = BITS(bitbltbuf, 32, 14), dbw = BITS(bitbltbuf, 48, 6), dpsm = BITS(bitbltbuf, 56, 6);
         u32 sbp = BITS(bitbltbuf, 0, 14), sbw = BITS(bitbltbuf, 16, 6), spsm = BITS(bitbltbuf, 24, 6);
@@ -2652,6 +2736,7 @@ static void gs_mesh_draw(u32 id, u32 first, u32 count, const float *xf)
     }
     xf = xfl;
     urec_hits(sti, gsmesh_rows(id, xf));
+    census_add(S, count / 3, 1);
     if (gsgl_on) {
         if (gsmesh[id].gl >= 0) gsgl_mesh_draw(S, sti, gsmesh[id].gl, (int)first, (int)count, xf);
         return;
@@ -3031,6 +3116,7 @@ void uya_gs_vsync(void)
 {
     if (!vram) return;
     if (survey_on()) survey_report();
+    census_vsync();
     if (uya_srcstats_on() && uya_frame_count() % srcstats == 0) srcstats_log();
     u64 r[6] = { *(volatile u64 *)0x12000000, *(volatile u64 *)0x12000020,
                  *(volatile u64 *)0x12000070, *(volatile u64 *)0x12000080, *(volatile u64 *)0x12000090, *(volatile u64 *)0x120000A0 };

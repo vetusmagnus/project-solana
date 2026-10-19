@@ -219,6 +219,8 @@ static void run(RcCtx *c, const TfRefs *R)
     /* the registers it saves */
     rc_sd(SPR + 0x3FF8, c->r[31].d[0]); rc_sd(SPR + 0x3FF0, c->r[30].d[0]); rc_sd(SPR + 0x3FE8, c->r[29].d[0]);
     for (int k = 23; k >= 16; k--) rc_sd(SPR + 0x3FA8 + 8 * (u32)(k - 16), c->r[k].d[0]);
+    if (R->g_t5 == R->g_t4 + 16 && R->g_t6 == R->g_t4 + 32 && R->g_t7 == R->g_t4 + 48)
+        native_terrain_where(gp + (u32)R->g_tbl, gp + (u32)R->g_cnt, gp + (u32)R->g_t4);
     u32 t8 = M32(gp + (u32)R->g_tbl), t9 = M32(gp + (u32)R->g_cnt);
     rc_sw(SPR + 0x3F10, t8);
     u32 s3 = t8 - 0x40;

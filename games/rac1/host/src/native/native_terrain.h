@@ -34,4 +34,7 @@ void native_terrain_seg_add(u32 idx, u32 mode);
  * it again: the packets go through the VIF), 0 not known */
 #define NATIVE_TXFORM_MARK 0x00005846u
 int native_tfrag_xform_tag(const u32 *q, u32 t);
+/* where TfragProc reads the tfrag table's pointer and count, and its templates t4..t7 (16 bytes apart):
+ * the terrain's meshes are built from there (the executable's copy has its own, before a level loads) */
+void native_terrain_where(u32 tbl_word, u32 cnt_word, u32 t4);
 #endif

@@ -303,3 +303,114 @@ from EE code). Research on each producer: piece7_research.md.
 - GL boot frames, native terrain vs the VU1 path: 2,680 px over 89 frames (about 38 a frame). Not from this
   change: the GPU terrain meshes are not bit-exact with the VU program (gameplay, level 3, the same A/B:
   59,779 px over 79 frames). The boot screens used to avoid it only by going through the VIF.
+
+## The GS model, item 1: the native renderers draw with materials (19 October, night)
+
+(Scope: dev/notes/gs_model_scope.md. Items 1-3 asked for; item 4, textures without GS memory, left.)
+
+- native_draw.h / native_draw.c: a material in host terms (the texture by where the game's upload put it,
+  its palette, filtering and levels, wrap, mip levels, the primitive's flags; parts a material gives in
+  `has`), read by the renderer from the game's own material blocks (nd_material_from_regs: TEX0, TEX1,
+  CLAMP, MIPTBP1/2, PRIM of one pass; any other register, or a value with bits a material has no field
+  for, stays as register writes). Tie, shrub, moby and terrain meshes (and their clip passes) draw with
+  nd_regs_mesh_draw / nd_mesh_draw (op 15): no GS register writes. Pass settings in host terms too
+  (nd_pass: blend, alpha/depth/target tests, target, depth, scissor, offset, FBA; fog colour, TEXA, colour
+  clamp, PRMODE/PRMODECONT, dither, PABE, TEXFLUSH): the native effect programs' packets (fx 57843,
+  221571, the tie/shrub/moby packet paths) have their register runs turned into materials and pass
+  settings (nd_pack, ops 17 and 18); their vertices stay as vertex strips. UYA_NDRAW: 0 register writes as
+  before, 1 check, 2 (default).
+- gs.c: the frame's two passes are host state (gs_pass_t gpass, decoded once when set), and a command's
+  pipeline state is built in parts (cmd_pass from the pass, cmd_target, cmd_texture). A material draw
+  builds its state from the material and the pass (cmd_material), not from registers; the material's
+  palette loads as its load mode says (the GS's CLUT buffer semantics), and the register image the
+  game's own GIF still reads afterwards is kept as the PS2's GS would hold it.
+- gs_gl.c: per-material programs for native meshes: the pixel stage compiled with the material's
+  switches as constants (textured, texture function, fog, alpha test and function, wrap modes, filters,
+  levels, the blend's terms, depth format); the values stay uniforms. UYA_GLSPEC=0: the general program.
+- The game's own GIF state packets (VIF1 DIRECT, PATH2) go through the same packing at the sink: their
+  register runs become pass settings and materials. Only texture transfers (BITBLTBUF..TRXDIR, uploads:
+  item 4) stay as register writes.
+- Checks: UYA_NDRAW=1 on level 3: 1.4 million material draws, the state identical to the register path's
+  for every one. Software, all 19 levels, materials vs register writes: 0 px (meshes alone, then with the
+  packets packed; level 13 differed once in the parallel run, 0 px rerun alone).
+
+## Item 2 begun: the game's 2D producers as host primitives
+
+- native_2d.c: a producer done natively from its arguments; its packet's place in the chain becomes a
+  marker (NATIVE_2D_MARK, a NEXT past the packet) and a record, drawn where the chain meets it as host
+  primitives (gs.c op 19: the material, then vertices the host assembles into the primitive kind's
+  triangles, strips, fans or sprites; the GS's vertex registers and queue are left as the same GIF would
+  leave them, for game GIF that still follows). UYA_N2D: 0, 1 check, 2 (default).
+- DrawTexturedQuad func_001F5800 (glyphs, HUD images): check 50/50 packets identical on the boot screens.
+  Its GIF template is found by its exact contents near the chain word (0x6C0 before it in the executable,
+  0x8C0 in the levels).
+- The sky's two emitters (asm): func_0022D3F8 (Gouraud triangles: per vertex RGBAQ, the colour word
+  sign-extended so its top bit becomes Q's bits, and XYZ2) and func_0022D520 (textured: TEX0 when a
+  triangle's texture byte changes, the game's own sky texture pager inline (func_0022D6B4: palette and
+  image placed at the allocation pointer, the TEX0 kept in the sky table, an upload entry added to the
+  list at 0x18D140), per vertex ST as 12-bit fixed point, RGBAQ 0x808080 + the vertex's alpha, Q 1.0,
+  XYZ2). Records of several op 19 blocks (the material changing inside a packet). Check: every packet
+  identical, levels 1, 3, 9 (over 6,000 of each kind a level).
+- gs.c op 19 is host code assembling primitives; when the GS's vertex queue already holds vertices from
+  before (no PRIM since), the vertices go through the queue as the GIF would send them (counted and
+  logged; not seen in the tests).
+- Checks: software, all 19 levels, UYA_N2D=0 vs default: 0 px (level 6 differed once in the parallel
+  run, 0 px rerun alone); boot frames (vsyncs 170-400): 0 px. GL on the GPU, levels 1, 3, 9, 13: 0 px.
+  Item 1 with it: GL levels 1, 3, 9, 13, UYA_NDRAW=0 UYA_N2D=0 vs default: 0 px; per-material programs vs
+  the general one (one recording replayed in WSL's GL twice; the replay is Mesa's compiler, not the
+  GPU driver's): levels 3, 9, 13: 0 px.
+- What the game still sends as GIF (level 3, GPU, UYA_SRCSTATS, a vsync): PATH2 507 packets, 1,508 drawn
+  vertex kicks (and the texture uploads' data); native 2D 15 records, 85 kicks. Of the game's GIF
+  primitives (UYA_PRIMLOG, software, level 3) about 726 of 925 are the shadow volumes: FRAME with FBMSK
+  0xFFFFFF (alpha only), TEX0 0x664021000, ALPHA 0x8000000044: func_002298B0's side quads and caps
+  (hand-written asm, from the scratchpad) with the destination-alpha stencil. The rest: the frame copy
+  strips (AA_BlurPass's tables, built once by the asm func_001FAB40), the darkening pass that reads the
+  stencil (func_00228690), billboards, the GS state blocks (already packed into pass settings).
+
+## Item 2 continued: the shadows, the billboards, the frame copy (19 October, early morning)
+
+- The shadow volumes, func_002298B0 (asm; the bulk of the game's 2D on level 3): its three packets (the
+  sides: a quad, PRIM 0x54, per record whose side flag is the pass, from the scratchpad records; the
+  front and back caps: fans, PRIM 0x55, when the sign times the cap's depth allows) built natively, each
+  a record of host primitives; VU0's vf1/vf2 left as the routine leaves them. Check: 14,000 calls a level
+  identical (levels 3, 9). op 20: the vertex colour a packet leaves with no vertex of its own.
+- The darkening pass that reads the stencil, func_00228690 (C in the decomp; translated in the levels):
+  the TEST setting (destination alpha test on) as a pass setting (op 18) and its 32-pixel sprite strips
+  as host primitives. Check: identical (levels 3, 9).
+- The glow billboards, func_001F9478 (C, with VU0 sine/cosine): the game's routine runs; at its return
+  each billboard packet it wrote (its fixed layout checked exactly) becomes a record of host primitives.
+- The frame copy, AA_BlurPass func_001FB848 and its twin func_001FB8A8: their REF to a table the game
+  builds once (func_001FAB40) becomes a marker; the table (its exact shape checked: TEST, CLAMP, TEX1,
+  TEX0 the frame buffer, 16 sprite strips; the twin's line) becomes the pass setting, the material and
+  host sprites drawn with the colour the GS holds (op 19 flag 2). The table is kept with the record and
+  compared again where the chain meets the marker; changed (the display set up again): GIF data.
+- A hazard found: in the levels a translated body can be shared by look-alike routines (the same bytes
+  but for their addresses: the catalogue names VU1_texFlush and three others func_001FB848), and a hook
+  in it then gets that body's relocations, which name other words in another routine (the frame copy's
+  hook saw a gp offset of -0x1240 and "chain word" 0x29 from texFlush's body). Every 2D hook now checks
+  its references strictly (chain_word_ok: the chain pointer's own word, holding a qword-aligned EE
+  address; the known gp offsets and tables) and otherwise lets the game's routine run. The earlier
+  builds passed every pixel test, but a hook taking a wrong body's references could have written to the
+  wrong memory: the builds from this round on have the checks.
+- Level 3 on the GPU (UYA_SRCSTATS, averaged over 400 vsyncs): the game's own GIF went from about 1,470
+  drawn vertex kicks a vsync (with only the quad and the sky native) to about 490; the native 2D draws
+  about 740. Final build: software 19 levels 0 px (level 5 once in the parallel run, 0 px alone), boot
+  frames 0 px, GL levels 1, 3, 9, 13 0 px.
+
+## Where items 2 and 3 stand (19 October, morning)
+
+- Item 2 is partly done: the glyph/HUD quad, the sky, the shadow volumes and their darkening pass, the
+  billboards and the frame copy are host draws; what remains of the game's GIF on level 3 is a few
+  hundred vertex kicks (other effects with ST textures, overlays, the GS state packets, which are already
+  pass settings), and on other levels and screens whatever producers those use. Every one of these still has to keep the GS's
+  register side effects for whatever GIF follows (op 19 leaves them as the GIF would), until all the
+  producers are ported. The ports left: the remaining ST-textured effects seen on level 3 (to be identified), the HUD sprite
+  family (func_00200468 and siblings), DrawRectOverlay, the fades and clears, the letterbox, the text
+  variants (func_001F5988, func_001F5BB8), the menus; and, to describe the frame copy without reading
+  its table, the table builder func_001FAB40 itself.
+- Item 3 not started: it needs item 2 done first. In gameplay the GPU targets already never sync with GS
+  memory (piece 6: 0 pages read back or uploaded); what keeps them "GS buffers by address" is that the
+  game's own GIF and the texture reads name them by FBP / TBP. Once the frame copy and the shadow pass are
+  native, the targets can be host objects (the back buffer, the display buffer, Z) with the boot and
+  level-load overlap (loading textures in the Z buffer's memory) handled explicitly, and the page
+  coherence code (owner / valid per 8 KB page) removed.

@@ -33,6 +33,7 @@
 #include "native_terrain.h"
 #include "uya_runtime.h"
 #include "native_dlist.h"
+#include "native_draw.h"
 #include "native_tfrag.h"
 #include "rac1_levels.h"
 const rac1_level_t *rac1_current_level(void);
@@ -492,8 +493,7 @@ static int draw(u32 i, int L, u32 mode)
             v[j] = ((u64)rd32(q + 4) << 32) | rd32(q); a[j] = rd32(q + 8) & 0xFF;
         }
         a[5] = 0x00; v[5] = prim;
-        native_regs(a, v, 6);
-        if (r->count) native_mesh_draw(id, r->first, r->count, xf);
+        nd_regs_mesh_draw(a, v, 6, id, r->first, r->count, xf);
     }
     return 1;
 }

@@ -55,6 +55,14 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_00229F00": "uya_shrubproc",     # ShrubProc (native_shrubproc.c)
               "func_00218B10": "uya_partproc",      # PartProc, the particles (native_partproc.c)
               "func_0022CEB8": "uya_partlist",      # a single particle list in PartProc's chain format (native_partproc.c)
+              "func_001F5800": "uya_dtquad",        # DrawTexturedQuad: glyphs and HUD images (native_2d.c)
+              "func_0022D3F8": "uya_skyg",          # the sky's Gouraud triangles (native_2d.c)
+              "func_0022D520": "uya_skyt",          # the sky's textured triangles (native_2d.c)
+              "func_002298B0": "uya_shadowvol",     # the shadow volumes' sides and caps (native_2d.c)
+              "func_00228690": "uya_darkpass",      # the shadows' darkening pass (native_2d.c)
+              "func_001F9478": "uya_billboards",    # the glow billboards (native_2d.c)
+              "func_001FB848": "uya_blurpass",      # the frame copy (AA_BlurPass, native_2d.c)
+              "func_001FB8A8": "uya_blurpass2",     # its twin (native_2d.c)
               "func_L00_002569F8": "uya_mobyproc",  # MobyProc (native_mobyproc.c; level code)
               "func_00212658": "uya_mobyproc",      # MobyProc, the executable's copy (before a level program is loaded: the boot screens)
               "func_L00_001EEBD8": "uya_mobyskin",  # the moby skin driver and its VU0 program (native_mobyskin.c)
@@ -72,7 +80,7 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_L01_00263338": "uya_stripl1"}       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
-HOST_HOOKS_ALLREFS = {"uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
+HOST_HOOKS_ALLREFS = {"uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
                       "uya_stripb_a52d0", "uya_stripb_16b38", "uya_stripb_c2b08", "uya_stripb_bd3d0"}
 _a = sys.argv[3:]
 while _a:

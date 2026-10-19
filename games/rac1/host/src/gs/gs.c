@@ -126,6 +126,29 @@ static u32 trx_bits(u32 psm)
 
 static gs_ctx_t ctx[2];
 static u64 prim, prmode, prmodecont = 1, rgbaq, st, uv, fog, texa, fogcol, colclamp, pabe, dthe;
+/* the frame's two draw passes in host form (target, depth, alpha test, blend, scissor, offset),
+ * decoded when the game's GIF sets them: what every draw reads, the native renderers' material
+ * draws (nd_mesh_draw, below) and the GIF's primitives alike */
+typedef struct {
+    u32 fbp, fbw, fpsm, fbmsk, zbp, zpsm; u8 zmsk;
+    u8 ate, atst, aref, afail, zte, ztst, date, datm;
+    u8 ba, bb, bc, bd, fix, fba;
+    int sx0, sx1, sy0, sy1;
+    float xoff, yoff;
+} gs_pass_t;
+static gs_pass_t gpass[2] = { { .zpsm = 0x30 }, { .zpsm = 0x30 } };   /* (as decoded from registers at 0) */
+static void pass_decode(int i)
+{
+    const gs_ctx_t *c = &ctx[i]; gs_pass_t *q = &gpass[i];
+    q->fbp = (u32)((c->frame) & 511) * 32; q->fbw = (u32)(c->frame >> 16) & 63; q->fpsm = (u32)(c->frame >> 24) & 63; q->fbmsk = (u32)(c->frame >> 32);
+    q->zbp = (u32)((c->zbuf) & 511) * 32; q->zpsm = ((u32)(c->zbuf >> 24) & 15) | 0x30; q->zmsk = (u8)((c->zbuf >> 32) & 1);
+    q->ate = (u8)(c->test & 1); q->atst = (u8)((c->test >> 1) & 7); q->aref = (u8)(c->test >> 4); q->afail = (u8)((c->test >> 12) & 3);
+    q->zte = (u8)((c->test >> 16) & 1); q->ztst = (u8)((c->test >> 17) & 3); q->date = (u8)((c->test >> 14) & 1); q->datm = (u8)((c->test >> 15) & 1);
+    q->ba = (u8)(c->alpha & 3); q->bb = (u8)((c->alpha >> 2) & 3); q->bc = (u8)((c->alpha >> 4) & 3); q->bd = (u8)((c->alpha >> 6) & 3); q->fix = (u8)(c->alpha >> 32);
+    q->fba = (u8)(c->fba & 1);
+    q->sx0 = (int)(c->scissor & 2047); q->sx1 = (int)((c->scissor >> 16) & 2047); q->sy0 = (int)((c->scissor >> 32) & 2047); q->sy1 = (int)((c->scissor >> 48) & 2047);
+    q->xoff = (float)(u32)(c->xyoffset & 0xFFFF) / 16.0f; q->yoff = (float)(u32)((c->xyoffset >> 32) & 0xFFFF) / 16.0f;
+}
 static u64 bitbltbuf, trxpos, trxreg, texclut;
 static float qreg = 1.0f;
 static u32 clut[256];                  /* loaded CLUT entries (raw 32-bit or 16-bit values) */
@@ -1717,41 +1740,60 @@ static void submit(const pprim_t *p)
 }
 
 /* the command for the current primitive: pipeline state and texture levels */
+static void cmd_pass(pcmd_t *p, const gs_pass_t *q);
+static void cmd_target(pcmd_t *p);
+static void cmd_texture(pcmd_t *p, const gs_ctx_t *c);
 static int cmd_setup(pcmd_t *p)
 {
     u64 pr = prmodecont ? prim : ((prim & 7) | (prmode & ~7ull));
     const gs_ctx_t *c = &ctx[BITS(pr, 9, 1)];
     memset(p, 0, sizeof *p);
     p->tme = BITS(pr, 4, 1); p->fge = BITS(pr, 5, 1); p->abe = BITS(pr, 6, 1); p->fst = BITS(pr, 8, 1); p->iip = BITS(pr, 3, 1);
-    p->fbp = BITS(c->frame, 0, 9) * 32; p->fbw = BITS(c->frame, 16, 6); p->fpsm = BITS(c->frame, 24, 6); p->fbmsk = (u32)(c->frame >> 32);
-    p->zbp = BITS(c->zbuf, 0, 9) * 32; p->zpsm = BITS(c->zbuf, 24, 4) | 0x30; p->zmsk = BITS(c->zbuf, 32, 1);
-    p->ate = BITS(c->test, 0, 1); p->atst = BITS(c->test, 1, 3); p->aref = BITS(c->test, 4, 8); p->afail = BITS(c->test, 12, 2);
-    p->zte = BITS(c->test, 16, 1); p->ztst = BITS(c->test, 17, 2);
-    p->date = BITS(c->test, 14, 1); p->datm = BITS(c->test, 15, 1);
-    p->ba = BITS(c->alpha, 0, 2); p->bb = BITS(c->alpha, 2, 2); p->bc = BITS(c->alpha, 4, 2); p->bd = BITS(c->alpha, 6, 2); p->fix = BITS(c->alpha, 32, 8);
-    p->tfx = BITS(c->tex0, 35, 2); p->tcc = BITS(c->tex0, 34, 1); p->fba = BITS(c->fba, 0, 1); p->clampc = BITS(colclamp, 0, 1);
-    p->sx0 = (int)BITS(c->scissor, 0, 11); p->sx1 = (int)BITS(c->scissor, 16, 11);
-    p->sy0 = (int)BITS(c->scissor, 32, 11); p->sy1 = (int)BITS(c->scissor, 48, 11);
+    cmd_pass(p, &gpass[BITS(pr, 9, 1)]);
+    p->tfx = BITS(c->tex0, 35, 2); p->tcc = BITS(c->tex0, 34, 1);
     p->tw = (float)(1u << BITS(c->tex0, 26, 4)); p->th = (float)(1u << BITS(c->tex0, 30, 4));
+    cmd_target(p);
+    cmd_texture(p, c);
+    return 1;
+}
+/* a command's pass part: target, depth, tests, blend, scissor (the frame's, from gpass), fog
+ * colour and colour clamp */
+static void cmd_pass(pcmd_t *p, const gs_pass_t *q)
+{
+    p->fbp = q->fbp; p->fbw = q->fbw; p->fpsm = q->fpsm; p->fbmsk = q->fbmsk;
+    p->zbp = q->zbp; p->zpsm = q->zpsm; p->zmsk = q->zmsk;
+    p->ate = q->ate; p->atst = q->atst; p->aref = q->aref; p->afail = q->afail;
+    p->zte = q->zte; p->ztst = q->ztst; p->date = q->date; p->datm = q->datm;
+    p->ba = q->ba; p->bb = q->bb; p->bc = q->bc; p->bd = q->bd; p->fix = q->fix;
+    p->fba = q->fba; p->clampc = BITS(colclamp, 0, 1);
+    p->sx0 = q->sx0; p->sx1 = q->sx1; p->sy0 = q->sy0; p->sy1 = q->sy1;
     p->fogr = (u8)BITS(fogcol, 0, 8); p->fogg = (u8)BITS(fogcol, 8, 8); p->fogb = (u8)BITS(fogcol, 16, 8);
     if (!p->zte) { p->ztst = 1; }          /* depth test off: always pass */
+}
+/* the pages this target writes count as changed (texture cache) */
+static void cmd_target(pcmd_t *p)
+{
     prim_serial++;
-    {   /* the pages this target writes count as changed (texture cache) */
-        static u64 lf, lz, ls; static int lzte;
-        if (c->frame != lf || c->zbuf != lz || c->scissor != ls || (int)p->zte != lzte) {
-            u32 h = (u32)p->sy1 + 1;
-            if (lf) mark_blocks((u32)BITS(lf, 0, 9) * 32, area_blocks(BITS(lf, 24, 6), BITS(lf, 16, 6), (u32)BITS(ls, 48, 11) + 1));
-            mark_blocks(p->fbp, area_blocks(p->fpsm, p->fbw, h)); n_mark_draw++;
-            if (p->zte) mark_blocks(p->zbp, area_blocks(p->zpsm, p->fbw, h));
-            cur_target[0] = p->fbp; cur_target[1] = area_blocks(p->fpsm, p->fbw, h);
-            cur_target[2] = p->zbp; cur_target[3] = (p->zte || !p->zmsk) ? area_blocks(p->zpsm, p->fbw, h) : 0;
-            cur_target[4] = p->fbw | (p->fpsm << 8); cur_target[5] = p->fbw | (p->zpsm << 8);
-            if (layout_conflict(cur_target[0], cur_target[1], (u16)cur_target[4]) ||
-                (cur_target[3] && layout_conflict(cur_target[2], cur_target[3], (u16)cur_target[5]))) { n_layout_drain++; gs_drain(); }
-            set_drawn_target();
-            lf = c->frame; lz = c->zbuf; ls = c->scissor; lzte = (int)p->zte;
-        }
+    static u32 lk[12]; static int lvalid;
+    u32 k[12] = { p->fbp, p->fbw, p->fpsm, p->fbmsk, p->zbp, p->zpsm, p->zmsk, (u32)p->sx0, (u32)p->sx1, (u32)p->sy0, (u32)p->sy1, p->zte };
+    if (!lvalid || memcmp(k, lk, sizeof k)) {
+        u32 h = (u32)p->sy1 + 1;
+        if (lvalid) mark_blocks(lk[0], area_blocks(lk[2], lk[1], lk[10] + 1));
+        mark_blocks(p->fbp, area_blocks(p->fpsm, p->fbw, h)); n_mark_draw++;
+        if (p->zte) mark_blocks(p->zbp, area_blocks(p->zpsm, p->fbw, h));
+        cur_target[0] = p->fbp; cur_target[1] = area_blocks(p->fpsm, p->fbw, h);
+        cur_target[2] = p->zbp; cur_target[3] = (p->zte || !p->zmsk) ? area_blocks(p->zpsm, p->fbw, h) : 0;
+        cur_target[4] = p->fbw | (p->fpsm << 8); cur_target[5] = p->fbw | (p->zpsm << 8);
+        if (layout_conflict(cur_target[0], cur_target[1], (u16)cur_target[4]) ||
+            (cur_target[3] && layout_conflict(cur_target[2], cur_target[3], (u16)cur_target[5]))) { n_layout_drain++; gs_drain(); }
+        set_drawn_target();
+        memcpy(lk, k, sizeof k); lvalid = 1;
     }
+}
+/* a command's texture part, from the texture's description c (TEX0 TEX1 CLAMP MIPTBP: the GIF's
+ * registers, or a native material's, nd_mesh_draw) */
+static void cmd_texture(pcmd_t *p, const gs_ctx_t *c)
+{
     if (p->tme) {
         u64 t1 = c->tex1;
         p->lcm = BITS(t1, 0, 1); p->mxl = BITS(t1, 2, 3); p->mmag = BITS(t1, 5, 1); p->mmin = BITS(t1, 6, 3); p->l = BITS(t1, 19, 2);
@@ -1789,7 +1831,6 @@ static int cmd_setup(pcmd_t *p)
         }
         if (nl >= 0 && nl < (int)p->mxl) p->mxl = (u8)nl;
     }
-    return 1;
 }
 
 
@@ -2328,7 +2369,7 @@ void uya_gs_write(u32 addr, u64 v)
         c->tex0 = (c->tex0 & ~m) | (v & m);
         clut_load(c->tex0);
     } break;
-    case 0x18: case 0x19: ctx[addr - 0x18].xyoffset = v; break;
+    case 0x18: case 0x19: ctx[addr - 0x18].xyoffset = v; pass_decode(addr - 0x18); break;
     case 0x34: case 0x35: ctx[addr - 0x34].miptbp1 = v; break;
     case 0x36: case 0x37: ctx[addr - 0x36].miptbp2 = v; break;
     case 0x1A: prmodecont = v & 1; break;
@@ -2336,21 +2377,21 @@ void uya_gs_write(u32 addr, u64 v)
     case 0x1C: texclut = v; break;
     case 0x3B: texa = v; break;
     case 0x3D: fogcol = v; break;
-    case 0x40: case 0x41: ctx[addr - 0x40].scissor = v; break;
-    case 0x42: case 0x43: ctx[addr - 0x42].alpha = v; break;
+    case 0x40: case 0x41: ctx[addr - 0x40].scissor = v; pass_decode(addr - 0x40); break;
+    case 0x42: case 0x43: ctx[addr - 0x42].alpha = v; pass_decode(addr - 0x42); break;
     case 0x45: dthe = v; break;
     case 0x46: colclamp = v; break;
-    case 0x47: case 0x48: ctx[addr - 0x47].test = v; break;
+    case 0x47: case 0x48: ctx[addr - 0x47].test = v; pass_decode(addr - 0x47); break;
     case 0x49: pabe = v; break;
-    case 0x4A: case 0x4B: ctx[addr - 0x4A].fba = v; break;
+    case 0x4A: case 0x4B: ctx[addr - 0x4A].fba = v; pass_decode(addr - 0x4A); break;
     case 0x4C: case 0x4D: {
         static int nlog = -1;
         if (nlog < 0) { const char *e = getenv("UYA_FRAMELOG"); nlog = e ? atoi(e) : 0; }
         if (nlog > 0 && ctx[addr - 0x4C].frame != v) { nlog--; uya_log("GS FRAME_%u = FBP 0x%X FBW %u PSM 0x%X MSK %08X", addr - 0x4C + 1, BITS(v, 0, 9) * 32, BITS(v, 16, 6) * 64, BITS(v, 24, 6), (u32)(v >> 32)); }
         { u32 ps = BITS(v, 24, 6); if (!BITS(v, 16, 6) || !(ps == 0 || ps == 1 || ps == 2 || ps == 0xA)) gs_bad("FRAME", v); }
-        ctx[addr - 0x4C].frame = v;
+        ctx[addr - 0x4C].frame = v; pass_decode(addr - 0x4C);
     } break;
-    case 0x4E: case 0x4F: ctx[addr - 0x4E].zbuf = v; break;
+    case 0x4E: case 0x4F: ctx[addr - 0x4E].zbuf = v; pass_decode(addr - 0x4E); break;
     case 0x50: bitbltbuf = v; break;
     case 0x51: trxpos = v; break;
     case 0x52: trxreg = v; break;
@@ -2721,17 +2762,22 @@ static void gs_mesh_vertex(const float *xf, const float *p6, const u8 *c, vtx_t 
     o->f = (u8)(f < 0 ? 0 : f > 255 ? 255 : (u32)f);
     *w_out = w / xf[16];                    /* (1/Q: the distance the near limit is in) */
 }
+static void gs_mesh_draw_st(u32 id, u32 first, u32 count, const float *xf, u32 sti);
 static void gs_mesh_draw(u32 id, u32 first, u32 count, const float *xf)
 {
     if (id >= GSMESH_N || !gsmesh[id].v6 || first + count > gsmesh[id].ni) return;
-    u32 sti = gs_cur_state();
+    gs_mesh_draw_st(id, first, count, xf, gs_cur_state());
+}
+static void gs_mesh_draw_st(u32 id, u32 first, u32 count, const float *xf, u32 sti)
+{
+    if (id >= GSMESH_N || !gsmesh[id].v6 || first + count > gsmesh[id].ni) return;
     const pcmd_t *S = &sring[sti % SN];
-    float xfl[32];   /* the caller's transform, with this GS's XYOFFSET and the texture's size */
+    float xfl[32];   /* the caller's transform, with the pass's offset and the texture's size */
     memcpy(xfl, xf, sizeof xfl);
     {
         u64 pr = prmodecont ? prim : ((prim & 7) | (prmode & ~7ull));
-        const gs_ctx_t *c = &ctx[BITS(pr, 9, 1)];
-        xfl[24] = (float)BITS(c->xyoffset, 0, 16) / 16.0f; xfl[25] = (float)BITS(c->xyoffset, 32, 16) / 16.0f;
+        const gs_pass_t *q = &gpass[BITS(pr, 9, 1)];
+        xfl[24] = q->xoff; xfl[25] = q->yoff;
         xfl[26] = S->tw; xfl[27] = S->th;
     }
     xf = xfl;
@@ -2752,6 +2798,230 @@ static void gs_mesh_draw(u32 id, u32 first, u32 count, const float *xf)
         if (w[0] < xf[23] || w[1] < xf[23] || w[2] < xf[23]) continue;   /* (behind the near limit: the GPU clips it) */
         pc.st = sti; pc.type = 3; stat_prims++; gs_kicks_drawn++;
         submit(&pc);
+    }
+}
+
+
+/* ---- material draws (host/src/native/native_draw.h) ----
+ * A native renderer's mesh draw comes with its material in host terms. Its parts (texture and
+ * palette, filtering, wrap, mip levels, the primitive) become the frame's texture state: the
+ * palette is loaded as its load mode says (the GS's CLUT buffer: an unchanged base is not read
+ * again), and the state the game's own GIF data reads after it is what the PS2's GS would hold
+ * after the class's material blocks. The draw's pipeline state is then built from the material
+ * and the frame's pass (gpass): the primitive's flags, target, depth, tests, blend and scissor,
+ * and the texture's levels from the uploads' store. No GS register is written or decoded for it.
+ * Check mode (UYA_NDRAW=1, op 16): the renderer also sends the register writes the material came
+ * from; they are applied first as GIF data would be and the state the GIF path builds from them
+ * is compared with the material's (counted, the first differences logged). */
+#include "../native/native_draw.h"
+#define ND_QW ((u32)((sizeof(nd_material) + 15) / 16))
+static unsigned long long nd_n, nd_chk, nd_bad;
+static u32 ndc_addr[16]; static u64 ndc_val[16]; static int ndc_n = -1;
+/* a material's parts as the texture state keeps them */
+static u64 nd_tex0(const nd_material *m)
+{
+    return (u64)m->tbp | (u64)m->tbw << 14 | (u64)m->fmt << 20 | (u64)m->wlog << 26 | (u64)m->hlog << 30 | (u64)m->tex_alpha << 34 |
+           (u64)m->combine << 35 | (u64)m->pal << 37 | (u64)m->pal_fmt << 51 | (u64)m->pal_layout << 55 | (u64)m->pal_offset << 56 | (u64)m->pal_load << 61;
+}
+static u64 nd_tex1(const nd_material *m)
+{
+    return (u64)m->lod_fixed | (u64)m->levels << 2 | (u64)m->mag_linear << 5 | (u64)m->min_mode << 6 | (u64)m->mip_follow << 9 |
+           (u64)m->lod_shift << 19 | (u64)(u16)m->lod_bias << 32;
+}
+static u64 nd_clamp(const nd_material *m)
+{
+    return (u64)m->wrap_u | (u64)m->wrap_v << 2 | (u64)m->u_min << 4 | (u64)m->u_max << 14 | (u64)m->v_min << 24 | (u64)m->v_max << 34;
+}
+static u64 nd_mip(const nd_material *m, int h)
+{
+    u64 v = 0;
+    for (int k = 0; k < 3; k++) v |= ((u64)m->mip_tbp[h * 3 + k] | (u64)m->mip_tbw[h * 3 + k] << 14) << (k * 20);
+    return v;
+}
+static u64 nd_prim(const nd_material *m)
+{
+    return (u64)m->kind | (u64)m->gouraud << 3 | (u64)m->textured << 4 | (u64)m->fog << 5 | (u64)m->blend << 6 | (u64)m->aa << 7 |
+           (u64)m->uv << 8 | (u64)m->ctx << 9;
+}
+static void nd_apply(const nd_material *m)
+{
+    gs_ctx_t *c = &ctx[m->pass & 1];
+    if (m->has & ND_TEX) { c->tex0 = nd_tex0(m); clut_load(c->tex0); }
+    if (m->has & ND_SAMPLE) c->tex1 = nd_tex1(m);
+    if (m->has & ND_WRAP) c->clamp = nd_clamp(m);
+    if (m->has & ND_MIP13) c->miptbp1 = nd_mip(m, 0);
+    if (m->has & ND_MIP46) c->miptbp2 = nd_mip(m, 1);
+    if (m->has & ND_PRIM) { prim = nd_prim(m); prim_reset(); }
+    st_dirty = 1;   /* (the GIF path builds its next state again) */
+}
+/* the draw's pipeline state: the primitive's flags (PRMODE's when the game set PRMODECONT off),
+ * the pass the primitive names, the texture state of that pass */
+static void cmd_material(pcmd_t *p)
+{
+    u32 tme, fge, abe, fst, iip, cx;
+    if (prmodecont) { tme = BITS(prim, 4, 1); fge = BITS(prim, 5, 1); abe = BITS(prim, 6, 1); fst = BITS(prim, 8, 1); iip = BITS(prim, 3, 1); cx = BITS(prim, 9, 1); }
+    else { tme = BITS(prmode, 4, 1); fge = BITS(prmode, 5, 1); abe = BITS(prmode, 6, 1); fst = BITS(prmode, 8, 1); iip = BITS(prmode, 3, 1); cx = BITS(prmode, 9, 1); }
+    const gs_ctx_t *t = &ctx[cx];
+    memset(p, 0, sizeof *p);
+    p->tme = (u8)tme; p->fge = (u8)fge; p->abe = (u8)abe; p->fst = (u8)fst; p->iip = (u8)iip;
+    cmd_pass(p, &gpass[cx]);
+    p->tfx = BITS(t->tex0, 35, 2); p->tcc = BITS(t->tex0, 34, 1);
+    p->tw = (float)(1u << BITS(t->tex0, 26, 4)); p->th = (float)(1u << BITS(t->tex0, 30, 4));
+    cmd_target(p);
+    cmd_texture(p, t);
+}
+/* a renderer's pass settings (its own packets' blend, tests, target...): the frame's pass as the
+ * GS would hold it after them */
+#define NP_QW ((u32)((sizeof(nd_pass) + 15) / 16))
+static void nd_pass_apply(const nd_pass *q)
+{
+    int i = q->pass & 1; gs_ctx_t *c = &ctx[i];
+    if (q->has & NP_BLEND) c->alpha = (u64)q->ba | (u64)q->bb << 2 | (u64)q->bc << 4 | (u64)q->bd << 6 | (u64)q->fix << 32;
+    if (q->has & NP_TEST) c->test = (u64)q->ate | (u64)q->atst << 1 | (u64)q->aref << 4 | (u64)q->afail << 12 | (u64)q->date << 14 | (u64)q->datm << 15 | (u64)q->zte << 16 | (u64)q->ztst << 17;
+    if (q->has & NP_TARGET) c->frame = (u64)q->fbp | (u64)q->fbw << 16 | (u64)q->fpsm << 24 | (u64)q->fbmsk << 32;
+    if (q->has & NP_DEPTH) c->zbuf = (u64)q->zbp | (u64)q->zpsm << 24 | (u64)q->zmsk << 32;
+    if (q->has & NP_SCISSOR) c->scissor = (u64)q->sx0 | (u64)q->sx1 << 16 | (u64)q->sy0 << 32 | (u64)q->sy1 << 48;
+    if (q->has & NP_OFFSET) c->xyoffset = (u64)q->xoff | (u64)q->yoff << 32;
+    if (q->has & NP_FBA) c->fba = q->fba;
+    if (q->has & NP_GFOG) fogcol = (u64)q->fog_r | (u64)q->fog_g << 8 | (u64)q->fog_b << 16;
+    if (q->has & NP_GTEXA) texa = (u64)q->ta0 | (u64)q->aem << 15 | (u64)q->ta1 << 32;
+    if (q->has & NP_GCLAMP) colclamp = q->colclamp;
+    if (q->has & NP_GPRCONT) prmodecont = q->prcont;
+    if (q->has & NP_GPRMODE) prmode = q->prmode;
+    if (q->has & NP_GDITHER) dthe = q->dither;
+    if (q->has & NP_GPABE) pabe = q->pabe;
+    pass_decode(i);
+    st_dirty = 1;
+}
+static void nd_diff(const pcmd_t *a, const pcmd_t *b)
+{
+    const u8 *x = (const u8 *)a, *y = (const u8 *)b;
+    for (u32 i = 0; i < sizeof *a; i++)
+        if (x[i] != y[i]) { uya_log("UYA_NDRAW check: the material's state differs from the registers' at byte %u (%02X, registers %02X) [%s]", i, x[i], y[i], gs_src_int); return; }
+}
+static void gs_nd_mesh_draw(u32 id, u32 first, u32 count, const float *xf, const nd_material *m)
+{
+    if (!sring) sring = calloc(SN, sizeof(pcmd_t));
+    pcmd_t rs; int chk = 0;
+    if (ndc_n >= 0) {   /* check mode: the register writes first, as the GIF path takes them */
+        for (int i = 0; i < ndc_n; i++) uya_gs_write(ndc_addr[i], ndc_val[i]);
+        ndc_n = -1;
+        if (count) { cmd_setup(&rs); chk = 1; }
+    }
+    nd_apply(m);
+    if (!count) return;
+    nd_n++;
+    pcmd_t ns;
+    cmd_material(&ns);
+    if (chk) { nd_chk++; if (!cmd_same(&ns, &rs)) { if (nd_bad++ < 10) nd_diff(&ns, &rs); } if (nd_chk % 200000 == 0) uya_log("UYA_NDRAW check: %llu material draws compared, %llu differ", nd_chk, nd_bad); }
+    if (__builtin_expect(sv_on > 0, 0)) survey_state(&ns);
+    if (!s_head || !cmd_same(&ns, &sring[(s_head - 1) % SN])) { sring[s_head % SN] = ns; s_head++; }
+    u32 sti = s_head - 1;
+    gs_mesh_draw_st(id, first, count, xf, sti);
+}
+
+/* ---- host primitives (op 19): a native 2D draw's primitives, made by host code from its own
+ * vertices (no GS vertex queue): the material (with its primitive kind) applied, the vertices put
+ * together as the kind says (triangles, strip, fan, sprites, lines, points), each primitive drawn
+ * with the state built from the material and the pass. After them, the GS's vertex registers and
+ * queue are left as the same primitives sent as GIF data would leave them (the colour and Q, ST,
+ * UV, the last vertices), for GIF data that still follows from the game. Vertices: {x | y << 16
+ * (screen, 1/16 pixel, the pass's offset included), z, fog, rgba} {s, t, q (float bits), u | v << 16
+ * (1/16 texel)}. */
+static u32 host_state(void)
+{
+    if (!sring) sring = calloc(SN, sizeof(pcmd_t));
+    if (st_dirty || (st_tme && st_epoch != dirty_epoch)) {
+        pcmd_t ns;
+        cmd_material(&ns);
+        if (__builtin_expect(sv_on > 0, 0)) survey_state(&ns);
+        if (!s_head || !cmd_same(&ns, &sring[(s_head - 1) % SN])) { sring[s_head % SN] = ns; s_head++; }
+        st_dirty = 0; st_tme = ns.tme; st_epoch = dirty_epoch;
+    }
+    return s_head - 1;
+}
+static void host_prim(u8 kind, const vtx_t *a, const vtx_t *b, const vtx_t *c)
+{
+    pprim_t pc;
+    stat_prims++; gs_kicks_drawn++;
+    pc.st = host_state();
+    census_add(&sring[pc.st % SN], 1, 0);
+    static const u8 nvk[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
+    pc.type = kind; pc.v[0] = *a; pc.v[1] = b ? *b : *a; pc.v[2] = c ? *c : pc.v[1];
+    {
+        int n = kind == 0 ? 1 : kind == 3 ? 3 : 2;
+        float ym = pc.v[0].y;
+        for (int k = 1; k < n; k++) if (pc.v[k].y > ym) ym = pc.v[k].y;
+        urec_hits(pc.st, ym < 0 ? 1u : (u32)ym + 2);
+    }
+    (void)nvk;
+    if (gsgl_on) gsgl_prim(&sring[pc.st % SN], pc.st, &pc);
+    else submit(&pc);
+}
+static void gs_nd_prims(const nd_material *m, const u32 *w, u32 nv, u32 flags)
+{
+    /* flags 1: the vertices have no ST (UV primitives): ST is what the GS holds; 2: no colour either:
+     * RGBA is what the GS holds, Q 1.0 (as the GIF tag leaves it) */
+    nd_apply(m);
+    qreg = 1.0f;                                     /* (as a GIF tag leaves Q) */
+    u32 cx = prmodecont ? BITS(prim, 9, 1) : BITS(prmode, 9, 1);
+    const gs_pass_t *ps = &gpass[cx];
+    static vtx_t *V; static u32 vcap;
+    if (nv > vcap) { free(V); vcap = nv + 256; V = malloc(vcap * sizeof *V); if (!V) { vcap = 0; return; } }
+    if (vcount) {   /* (the GS's queue holds vertices from before, no PRIM since: they go as the GIF would send them) */
+        static unsigned long long nq; if (nq++ < 3) uya_log("host primitives: %d vertices queued before (kind %u): sent through the vertex queue", vcount, (u32)(prim & 7));
+        for (u32 i = 0; i < nv; i++) {
+            const u32 *a = w + i * 8;
+            rgbaq = (u64)a[3] | (u64)a[6] << 32; memcpy(&qreg, &a[6], 4);
+            if (!(flags & 1)) st = (u64)a[4] | (u64)a[5] << 32;
+            uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
+            vertex_kick(a[0] & 0xFFFF, a[0] >> 16, a[1], (u8)a[2], 1);
+        }
+        return;
+    }
+    for (u32 i = 0; i < nv; i++) {
+        const u32 *a = w + i * 8;
+        vtx_t *v = &V[i];
+        v->x = (float)(a[0] & 0xFFFF) / 16.0f - ps->xoff; v->y = (float)(a[0] >> 16) / 16.0f - ps->yoff;
+        v->z = a[1]; v->f = (u8)a[2];
+        u32 cl = (flags & 2) ? (u32)rgbaq : a[3];
+        v->r = (u8)cl; v->g = (u8)(cl >> 8); v->b = (u8)(cl >> 16); v->a = (u8)(cl >> 24);
+        if (flags & 1) { u32 s_ = (u32)st, t_ = (u32)(st >> 32); memcpy(&v->s, &s_, 4); memcpy(&v->t, &t_, 4); }
+        else { memcpy(&v->s, &a[4], 4); memcpy(&v->t, &a[5], 4); }
+        if (flags & 2) v->q = 1.0f; else memcpy(&v->q, &a[6], 4);
+        v->u = (float)(a[7] & 0x3FFF) / 16.0f; v->v = (float)((a[7] >> 16) & 0x3FFF) / 16.0f;
+    }
+    u32 type = (u32)(prim & 7);
+    static const u8 kind[8] = { 0, 1, 1, 3, 3, 3, 6, 0 };
+    switch (type) {
+    case 0: for (u32 i = 0; i < nv; i++) host_prim(0, &V[i], 0, 0); break;
+    case 1: for (u32 i = 0; i + 1 < nv; i += 2) host_prim(1, &V[i], &V[i + 1], 0); break;
+    case 2: for (u32 i = 0; i + 1 < nv; i++) host_prim(1, &V[i], &V[i + 1], 0); break;
+    case 3: for (u32 i = 0; i + 2 < nv; i += 3) host_prim(3, &V[i], &V[i + 1], &V[i + 2]); break;
+    case 4: for (u32 i = 0; i + 2 < nv; i++) host_prim(3, &V[i], &V[i + 1], &V[i + 2]); break;
+    case 5: for (u32 i = 1; i + 1 < nv; i++) host_prim(3, &V[0], &V[i], &V[i + 1]); break;
+    case 6: for (u32 i = 0; i + 1 < nv; i += 2) host_prim(6, &V[i], &V[i + 1], 0); break;
+    default: break;
+    }
+    (void)kind;
+    /* the GS's vertex registers and queue as the GIF would leave them */
+    if (nv) {
+        const u32 *a = w + (nv - 1) * 8;
+        if (flags & 2) qreg = 1.0f;
+        else { rgbaq = (u64)a[3] | (u64)a[6] << 32; memcpy(&qreg, &a[6], 4); }
+        if (!(flags & 1)) st = (u64)a[4] | (u64)a[5] << 32;
+        uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
+        static const u32 need[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
+        u32 left;
+        switch (type) {
+        case 2: left = 1; break;
+        case 4: left = nv >= 2 ? 2 : nv; break;
+        case 5: left = nv >= 2 ? 2 : nv; break;
+        default: left = nv % need[type]; break;
+        }
+        vcount = (int)left;
+        if (type == 5 && nv >= 2) { vq[0] = V[0]; vq[1] = V[nv - 1]; }
+        else for (u32 k = 0; k < left; k++) vq[k] = V[nv - left + k];
     }
 }
 
@@ -2805,6 +3075,33 @@ static void gs_dlist_(const u32 *d, u32 qwc)
         case 13: vertex_kick(c[1] & 0xFFFF, c[1] >> 16, c[2], (u8)c[3], (c[3] >> 8) & 1); q++; break;   /* {13, x | y << 16, z, f | draw << 8} */
         case 14: fog = (u64)(c[1] & 255) << 56; q++; break;                         /* {14, f} */
         case 6: gs_mesh_free(c[1]); q++; break;
+        case 15: {  /* a material draw: {15, id, first, count} + 8 qwords of transform + the material (native_draw.h) */
+            nd_material m; memcpy(&m, c + 36, sizeof m);
+            gs_nd_mesh_draw(c[1], c[2], c[3], (const float *)(c + 4), &m);
+            q += 9 + ND_QW;
+        } break;
+        case 19: {  /* host primitives: {19, flags, nv} + the material + nv * 2 qwords of vertex */
+            nd_material m; memcpy(&m, c + 4, sizeof m);
+            gs_nd_prims(&m, c + 4 + ND_QW * 4, c[2], c[1]);
+            q += 1 + ND_QW + 2 * c[2];
+        } break;
+        case 20: rgbaq = (u64)c[1] | (u64)c[2] << 32; memcpy(&qreg, &c[2], 4); q++; break;   /* the vertex colour a 2D draw leaves: {20, rgba, q} */
+        case 17: {  /* a material on its own (a renderer's packet): {17} + the material */
+            nd_material m; memcpy(&m, c + 4, sizeof m);
+            nd_apply(&m);
+            q += 1 + ND_QW;
+        } break;
+        case 18: {  /* a renderer's pass settings: {18} + the settings */
+            nd_pass pq; memcpy(&pq, c + 4, sizeof pq);
+            nd_pass_apply(&pq);
+            q += 1 + NP_QW;
+        } break;
+        case 16: {  /* check mode: the register writes the next material came from, {16, n} + n * {addr, lo, hi} */
+            u32 n = c[1] < 16 ? c[1] : 16;
+            for (u32 i = 0; i < n; i++) { const u32 *r = c + 4 + i * 4; ndc_addr[i] = r[0]; ndc_val[i] = ((u64)r[2] << 32) | r[1]; }
+            ndc_n = (int)n;
+            q += 1 + c[1];
+        } break;
         case 7: {   /* draw indices [first, first + count) of mesh id: {7, id, first, count} + 8 qwords of transform */
             gs_mesh_draw(c[1], c[2], c[3], (const float *)(c + 4));
             q += 9;

@@ -1571,6 +1571,60 @@ void gsgl_mesh_free(int id)
  * and the transform xf: 16 floats (rows 0..3), then k (Q numerator, fog min, fog max, fog
  * offset), o (screen offset x y z, near limit), x (XYOFFSET x y / 16, texture w h), c (the
  * frustum's clip scale x y z w: z 0 for none) */
+/* ---- per-material programs for native meshes ----
+ * A native mesh's material (host/src/native/native_draw.h) picks which parts of the pixel stage
+ * run: textured or not, the texture function, fog, alpha test and its function, the wrap modes,
+ * filters and levels, the blend's terms, the depth format. Each combination gets its own program,
+ * fs_src compiled with those switches as constants (K_*), so a mesh's pixels run only its
+ * material's code; the values (the alpha reference, the region, the LOD, FIX, fog colour) stay
+ * uniforms. The arithmetic is the same code either way. UYA_GLSPEC=0: the one general program. */
+static const char *fs_src, *nvs_src;
+static GLuint compile(GLenum type, const char *src);
+static GLuint link2(GLuint v, GLuint f, int dual);
+#define MPROG_N 512
+typedef struct { u64 key; GLuint prog; GLint un_i, un_vp, un_apass, un_m, un_k, un_o, un_x, un_c; float l_vp[4], l_xf[32]; GLint l_U[40]; int l_ok; } mprog_t;
+static mprog_t mprog[MPROG_N]; static int nmprog, glspec = -1;
+static unsigned long long mprog_draws, mprog_general;
+static mprog_t *mprog_get(const GLint *U, const GLint *R)
+{
+    static const char *nm[] = { "TME", "FGE", "ATE", "ATST", "FBA", "DATE", "OUT16", "SRC", "IIP", "ZFMT", "BLA", "BLD", "BLC", "ABE", "BNEG",
+                                "TFX", "TCC", "WMS", "WMT", "MMAG", "MMIN", "MXL", "LCM" };
+    GLint v[23] = { U[0], U[3], U[4], U[5], U[8], U[9], U[11], U[23], U[27], U[31], U[32], U[33], U[34], U[36], U[39],
+                    R[12], R[13], R[0], R[1], R[6], R[7], R[8], R[9] };
+    static const int bits[23] = { 1, 1, 1, 3, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 2, 1, 2, 2, 1, 3, 3, 1 };
+    u64 key = 0; int sh = 0;
+    for (int k = 0; k < 23; k++) { if ((u32)v[k] >= (1u << bits[k])) return 0; key |= (u64)v[k] << sh; sh += bits[k]; }
+    key |= 1ull << 63;
+    for (int k = 0; k < nmprog; k++) if (mprog[k].key == key) return &mprog[k];
+    if (nmprog >= MPROG_N) return 0;
+    char def[1024]; int o = 0;
+    for (int k = 0; k < 23; k++) o += snprintf(def + o, sizeof def - o, "#define K_%s %d\n", nm[k], (int)v[k]);
+    const char *nl = strchr(fs_src, '\n');
+    size_t h = (size_t)(nl - fs_src) + 1, n = strlen(fs_src);
+    char *src = malloc(n + (size_t)o + 64);
+    if (!src) return 0;
+    memcpy(src, fs_src, h); src[h] = 0; strcat(src, "#define MESH 1\n"); strcat(src, def); strcat(src, fs_src + h);
+    static GLuint vsh;
+    if (!vsh) vsh = compile(GL_VERTEX_SHADER, nvs_src);
+    GLuint pr = link2(vsh, compile(GL_FRAGMENT_SHADER, src), 1);
+    free(src);
+    if (!pr) return 0;
+    mprog_t *m = &mprog[nmprog++];
+    memset(m, 0, sizeof *m);
+    m->key = key; m->prog = pr;
+    p_glUseProgram(pr);
+    p_glUniform1i(p_glGetUniformLocation(pr, "u_atlas"), 0);
+    p_glUniform1i(p_glGetUniformLocation(pr, "u_rt"), 7);
+    p_glUniform1i(p_glGetUniformLocation(pr, "u_dt"), 8);
+    p_glUniform1i(p_glGetUniformLocation(pr, "u_rec"), 9);
+    p_glUniform1i(p_glGetUniformLocation(pr, "u_sc"), sc);
+    m->un_i = p_glGetUniformLocation(pr, "u_i"); m->un_vp = p_glGetUniformLocation(pr, "u_vp"); m->un_apass = p_glGetUniformLocation(pr, "u_apass");
+    m->un_m = p_glGetUniformLocation(pr, "u_m"); m->un_k = p_glGetUniformLocation(pr, "u_k");
+    m->un_o = p_glGetUniformLocation(pr, "u_o"); m->un_x = p_glGetUniformLocation(pr, "u_x"); m->un_c = p_glGetUniformLocation(pr, "u_c");
+    gc.prog = pr;
+    if (nmprog % 16 == 0) uya_log("GL GS: %d material programs", nmprog);
+    return m;
+}
 void gsgl_mesh_draw(const pcmd_t *S, u32 sti, int id, int first, int count, const float *xf)
 {
     if (!prog_n || id < 0 || id >= NMESH || !nmesh[id].used || count <= 0) return;
@@ -1606,22 +1660,31 @@ void gsgl_mesh_draw(const pcmd_t *S, u32 sti, int id, int first, int count, cons
     int fok = flush_setup(&bs, &fx);
     in_mesh_draw = 0;
     if (!fok) { gsgl_batch_id++; return; }
-    if (gc.prog != prog_n) { p_glUseProgram(prog_n); gc.prog = prog_n; }
+    /* the material's program (or the general one), and its uniforms: only those that changed since
+     * its last draw are sent (each program keeps its own) */
+    if (glspec < 0) { const char *e = getenv("UYA_GLSPEC"); glspec = !e || atoi(e) != 0; }
+    static mprog_t gen;
+    mprog_t *mp = glspec ? mprog_get(fx.U, recs[0]) : 0;
+    if (!mp) {
+        mp = &gen; mprog_general++;
+        if (!gen.prog) { gen.prog = prog_n; gen.un_i = un_i; gen.un_vp = un_vp; gen.un_apass = un_apass; gen.un_m = un_m; gen.un_k = un_k; gen.un_o = un_o; gen.un_x = un_x; gen.un_c = un_c; }
+    }
+    mprog_draws++;
+    if (gc.prog != mp->prog) { p_glUseProgram(mp->prog); gc.prog = mp->prog; }
     p_glBindVertexArray(nmesh[id].vao);
-    /* (the program's uniforms keep their values: only those that changed since the last mesh draw are sent) */
-    static float l_vp[4], l_xf[32]; static int l_U[40], l_ok;
     float vp[4] = { 2.0f / (float)fx.ct->w, 2.0f / (float)TGH, 0.5f - 1.0f / 128.0f, (float)sc };
-    if (!l_ok || memcmp(vp, l_vp, sizeof vp)) { p_glUniform4f(un_vp, vp[0], vp[1], vp[2], vp[3]); memcpy(l_vp, vp, sizeof vp); }
-    if (!l_ok || memcmp(xf, l_xf, 16 * 4)) p_glUniform4fv(un_m, 4, xf);
-    if (!l_ok || memcmp(xf + 16, l_xf + 16, 16)) p_glUniform4fv(un_k, 1, xf + 16);
-    if (!l_ok || memcmp(xf + 20, l_xf + 20, 16)) p_glUniform4fv(un_o, 1, xf + 20);
-    if (!l_ok || memcmp(xf + 24, l_xf + 24, 16)) p_glUniform4fv(un_x, 1, xf + 24);
-    if (!l_ok || memcmp(xf + 28, l_xf + 28, 16)) p_glUniform4fv(un_c, 1, xf + 28);
-    memcpy(l_xf, xf, sizeof l_xf);
-    if (!l_ok || memcmp(fx.U, l_U, sizeof l_U)) { p_glUniform4iv(un_i, 10, fx.U); memcpy(l_U, fx.U, sizeof l_U); }
-    l_ok = 1;
+    int l_ok = mp->l_ok;
+    if (!l_ok || memcmp(vp, mp->l_vp, sizeof vp)) { p_glUniform4f(mp->un_vp, vp[0], vp[1], vp[2], vp[3]); memcpy(mp->l_vp, vp, sizeof vp); }
+    if (!l_ok || memcmp(xf, mp->l_xf, 16 * 4)) p_glUniform4fv(mp->un_m, 4, xf);
+    if (!l_ok || memcmp(xf + 16, mp->l_xf + 16, 16)) p_glUniform4fv(mp->un_k, 1, xf + 16);
+    if (!l_ok || memcmp(xf + 20, mp->l_xf + 20, 16)) p_glUniform4fv(mp->un_o, 1, xf + 20);
+    if (!l_ok || memcmp(xf + 24, mp->l_xf + 24, 16)) p_glUniform4fv(mp->un_x, 1, xf + 24);
+    if (!l_ok || memcmp(xf + 28, mp->l_xf + 28, 16)) p_glUniform4fv(mp->un_c, 1, xf + 28);
+    memcpy(mp->l_xf, xf, sizeof mp->l_xf);
+    if (!l_ok || memcmp(fx.U, mp->l_U, sizeof mp->l_U)) { p_glUniform4iv(mp->un_i, 10, fx.U); memcpy(mp->l_U, fx.U, sizeof mp->l_U); }
+    mp->l_ok = 1;
     for (int k = 0; k < fx.np; k++) {
-        p_glUniform1i(un_apass, fx.ps[k].apass);
+        p_glUniform1i(mp->un_apass, fx.ps[k].apass);
         if (gc.cmask != fx.ps[k].cm) { p_glColorMask(fx.ps[k].cm & 1, (fx.ps[k].cm >> 1) & 1, (fx.ps[k].cm >> 2) & 1, (fx.ps[k].cm >> 3) & 1); gc.cmask = fx.ps[k].cm; }
         if (gc.dmask != fx.ps[k].zw) { p_glDepthMask((GLboolean)fx.ps[k].zw); gc.dmask = fx.ps[k].zw; }
         p_glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void *)((uintptr_t)first * 4));
@@ -1693,18 +1756,18 @@ static const char *fs_src =
     "ivec4 R0, R1, R2, R3; int RB;\n"
     "layout(location=0, index=0) out vec4 o_c;\n"
     "layout(location=0, index=1) out vec4 o_b;\n"
-    "#define TME u_i[0].x\n#define TFX R3.x\n#define TCC R3.y\n#define FGE u_i[0].w\n"
-    "#define ATE u_i[1].x\n#define ATST u_i[1].y\n#define AREF u_i[1].z\n#define APASS u_apass\n"
-    "#define FBA u_i[2].x\n#define DATE u_i[2].y\n#define DATM u_i[2].z\n#define OUT16 u_i[2].w\n"
-    "#define WMS R0.x\n#define WMT R0.y\n#define MINU R0.z\n#define MAXU R0.w\n"
-    "#define MINV R1.x\n#define MAXV R1.y\n#define MMAG R1.z\n#define MMIN R1.w\n"
-    "#define MXL R2.x\n#define LCM R2.y\n#define LL R2.z\n#define KK intBitsToFloat(R2.w)\n#define SRC u_i[5].w\n"
+    "#ifdef K_TME\n#define TME K_TME\n#else\n#define TME u_i[0].x\n#endif\n#ifdef K_TFX\n#define TFX K_TFX\n#else\n#define TFX R3.x\n#endif\n#ifdef K_TCC\n#define TCC K_TCC\n#else\n#define TCC R3.y\n#endif\n#ifdef K_FGE\n#define FGE K_FGE\n#else\n#define FGE u_i[0].w\n#endif\n"
+    "#ifdef K_ATE\n#define ATE K_ATE\n#else\n#define ATE u_i[1].x\n#endif\n#ifdef K_ATST\n#define ATST K_ATST\n#else\n#define ATST u_i[1].y\n#endif\n#define AREF u_i[1].z\n#define APASS u_apass\n"
+    "#ifdef K_FBA\n#define FBA K_FBA\n#else\n#define FBA u_i[2].x\n#endif\n#ifdef K_DATE\n#define DATE K_DATE\n#else\n#define DATE u_i[2].y\n#endif\n#define DATM u_i[2].z\n#ifdef K_OUT16\n#define OUT16 K_OUT16\n#else\n#define OUT16 u_i[2].w\n#endif\n"
+    "#ifdef K_WMS\n#define WMS K_WMS\n#else\n#define WMS R0.x\n#endif\n#ifdef K_WMT\n#define WMT K_WMT\n#else\n#define WMT R0.y\n#endif\n#define MINU R0.z\n#define MAXU R0.w\n"
+    "#define MINV R1.x\n#define MAXV R1.y\n#ifdef K_MMAG\n#define MMAG K_MMAG\n#else\n#define MMAG R1.z\n#endif\n#ifdef K_MMIN\n#define MMIN K_MMIN\n#else\n#define MMIN R1.w\n#endif\n"
+    "#ifdef K_MXL\n#define MXL K_MXL\n#else\n#define MXL R2.x\n#endif\n#ifdef K_LCM\n#define LCM K_LCM\n#else\n#define LCM R2.y\n#endif\n#define LL R2.z\n#define KK intBitsToFloat(R2.w)\n#ifdef K_SRC\n#define SRC K_SRC\n#else\n#define SRC u_i[5].w\n#endif\n"
     "ivec4 LVP(int l) { return texelFetch(u_rec, RB + 4 + 2 * l); }\n"
     "ivec4 LVS(int l) { return texelFetch(u_rec, RB + 5 + 2 * l); }\n"
-    "#define RT24 u_i[6].x\n#define TA0 u_i[6].y\n#define AEM u_i[6].z\n#define IIP u_i[6].w\n"
-    "#define FOGC u_i[7].xyz\n#define ZFMT u_i[7].w\n"
-    "#define BLA u_i[8].x\n#define BLD u_i[8].y\n#define BLC u_i[8].z\n#define FIX u_i[8].w\n"
-    "#define ABE u_i[9].x\n#define RTW u_i[9].y\n#define RTH u_i[9].z\n#define BNEG u_i[9].w\n"
+    "#define RT24 u_i[6].x\n#define TA0 u_i[6].y\n#define AEM u_i[6].z\n#ifdef K_IIP\n#define IIP K_IIP\n#else\n#define IIP u_i[6].w\n#endif\n"
+    "#define FOGC u_i[7].xyz\n#ifdef K_ZFMT\n#define ZFMT K_ZFMT\n#else\n#define ZFMT u_i[7].w\n#endif\n"
+    "#ifdef K_BLA\n#define BLA K_BLA\n#else\n#define BLA u_i[8].x\n#endif\n#ifdef K_BLD\n#define BLD K_BLD\n#else\n#define BLD u_i[8].y\n#endif\n#ifdef K_BLC\n#define BLC K_BLC\n#else\n#define BLC u_i[8].z\n#endif\n#define FIX u_i[8].w\n"
+    "#ifdef K_ABE\n#define ABE K_ABE\n#else\n#define ABE u_i[9].x\n#endif\n#define RTW u_i[9].y\n#define RTH u_i[9].z\n#ifdef K_BNEG\n#define BNEG K_BNEG\n#else\n#define BNEG u_i[9].w\n#endif\n"
     "int wrap1(int x, int n, int wm, int mn, int mx) {\n"
     "  if (wm == 0) return x & (n - 1);\n"
     "  if (wm == 1) return x < 0 ? 0 : (x >= n ? n - 1 : x);\n"

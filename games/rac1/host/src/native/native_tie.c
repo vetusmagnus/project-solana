@@ -174,6 +174,7 @@ u32 native_tie_draw(const u8 *mem, u32 top, u32 *out)
  * the GS layer's CPU form, gs_mesh_vertex, gives the packet's values bit for bit).
  * UYA_NTIEMESH=0: the packets. */
 #include "native_dlist.h"
+#include "native_draw.h"
 #include <stdlib.h>
 #include <stdio.h>
 #define TM_ID0 16384u
@@ -356,8 +357,7 @@ static int tm_draw(const TieClass *c, int mi, const u32 *rows, const u32 *idx, c
         u32 a[6]; u64 v[6]; int n = 0;
         for (int j = 0; j < 5; j++) { const u32 *q = c->ad[r->blk][j]; a[n] = q[2] & 0xFF; v[n++] = ((u64)q[1] << 32) | q[0]; }
         if (r->strips && m->pre) { a[n] = 0x00; v[n++] = m->prim; }
-        native_regs(a, v, n);
-        if (r->count) native_mesh_draw(TM_ID0 + (u32)tm_cur, r->first, r->count, xf);
+        nd_regs_mesh_draw(a, v, n, TM_ID0 + (u32)tm_cur, r->first, r->count, xf);
     }
     if (++tm_n_mesh % 200000 == 0) { u32 bad = 0; for (u32 i = 0; i < ntm; i++) bad += !tm[i].ok; uya_log("native tie meshes: %u classes (%u as packets), instances %llu as meshes, %llu as packets, %llu mesh updates", ntm, bad, tm_n_mesh, tm_n_pk, tm_n_up); }
     return 1;

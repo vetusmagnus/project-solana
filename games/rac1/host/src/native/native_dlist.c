@@ -10,6 +10,7 @@
  * packets. Data of another shape goes register by register (native_gif,
  * below). UYA_DLIST=0 sends everything as GIF packets (to compare). */
 #include "native_dlist.h"
+#include "native_draw.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,7 +79,14 @@ void native_kick(const u32 *pk, u32 qwc)
     u32 cap = qwc * 2 + 16;
     if (cap > bufq) { free(buf); buf = malloc((size_t)cap * 16); bufq = cap; }
     u32 n = buf ? convert(pk, qwc, buf, cap) : 0;
-    if (n) uya_gs_dlist(buf, n);
+    if (n) {   /* its register writes as materials and pass settings where they are (native_draw.c) */
+        static u32 *pb; static u32 pbq;
+        u32 pc = n * 5 + 16;
+        if (pc > pbq) { free(pb); pb = malloc((size_t)pc * 16); pbq = pc; }
+        u32 m = pb ? nd_pack(buf, n, pb, pc) : 0;
+        if (m) uya_gs_dlist(pb, m);
+        else uya_gs_dlist(buf, n);
+    }
     else native_gif(0, pk, qwc);   /* (another shape: register by register) */
 }
 
@@ -95,6 +103,17 @@ void native_kick(const u32 *pk, u32 qwc)
  * DMA channel) go the same way, with their own tag state. UYA_DLIST=0 sends
  * it all as GIF data. */
 static u32 p_left[3], p_img[3];
+/* ops with their register runs as materials and pass settings where they are (native_draw.c
+ * nd_pack); as they are otherwise */
+static void send_packed(const u32 *ops, u32 n)
+{
+    static u32 *pb; static u32 pbq;
+    u32 pc = n * 5 + 16;
+    if (pc > pbq) { free(pb); pb = malloc((size_t)pc * 16); pbq = pc; }
+    u32 m = pb ? nd_pack(ops, n, pb, pc) : 0;
+    if (m) uya_gs_dlist(pb, m);
+    else uya_gs_dlist(ops, n);
+}
 static unsigned long long dir_n[3];   /* (qwords as ops, as GIF data: IMAGE, split tags) */
 void native_direct_stats(void)
 {
@@ -111,7 +130,7 @@ void native_gif(int path, const u32 *d, u32 qwc)
     if (cap > bufq) { free(buf); buf = malloc((size_t)cap * 16); bufq = cap; }
     u32 q = 0, o = 0;
 #define PUT4(a, b, c_, e) do { u32 *w_ = buf + o * 4; w_[0] = (a); w_[1] = (b); w_[2] = (c_); w_[3] = (e); o++; } while (0)
-#define FLUSH() do { if (o) { uya_gs_dlist(buf, o); o = 0; } } while (0)
+#define FLUSH() do { if (o) { send_packed(buf, o); o = 0; } } while (0)
     if (path == 0) p_left[0] = 0;   /* (XGKICK starts a packet at its tag) */
     if (p_left[path]) {
         u32 n = p_left[path] < qwc ? p_left[path] : qwc;

@@ -37,6 +37,7 @@
 typedef unsigned short u16;
 typedef short s16;
 #include "native_dlist.h"
+#include "native_draw.h"
 
 /* the VU registers the program keeps from one run to the next */
 static struct {
@@ -776,16 +777,18 @@ static int mm_draw(Ctx *c)
     xf[20] = c->off[0]; xf[21] = c->off[1]; xf[22] = c->off[2]; xf[23] = -3.4028235e38f;   /* (no near limit: these packets are inside the view) */
     xf[28] = 0.0f; xf[29] = 0.0f; xf[30] = 1e-30f; xf[31] = 1.0f;   /* (the GPU: no near or far cut but w > 0) */
     extern const char *uya_gs_src; uya_gs_src = "native moby";
-    u32 pa = 0; u64 pv = prim;
     for (int k = 0; k < m->nseg; k++) {
+        u32 a[9]; u64 v[9]; int na = 0;
         if (k > 0) {
-            u32 a[8]; u64 v[8]; int na = mm_adn[k - 1];
+            na = mm_adn[k - 1];
             for (int j = 0; j < na; j++) { const u32 *q = mm_ad[k - 1][j]; a[j] = q[2] & 0xFF; v[j] = ((u64)q[1] << 32) | q[0]; }
-            native_regs(a, v, na);
         }
-        if (pre) native_regs(&pa, &pv, 1);
+        if (pre) { a[na] = 0; v[na++] = prim; }
         u32 first = m->seg[2 * k], count = m->seg[2 * k + 1];
-        if (head && k == (kind[0] == 2 ? 1 : 0)) {
+        int hd = head && k == (kind[0] == 2 ? 1 : 0);
+        if (!hd) { if (na || count) nd_regs_mesh_draw(a, v, na, MM_ID0 + (u32)id, first, count, xf); continue; }
+        if (na) nd_regs_mesh_draw(a, v, na, MM_ID0 + (u32)id, 0, 0, xf);   /* (the material before the head packet) */
+        {
             /* entries 0..3 as the program sends them (a strip of four), then the mesh's triangles after them */
             static u32 pk[13 * 4];
             u64 tg = 4 | (1ull << 15) | ((u64)pre << 46) | (prim << 47) | (3ull << 60);
@@ -802,7 +805,7 @@ static int mm_draw(Ctx *c)
             for (int e = kind[0] == 2 ? 0 : 0; e < 4; e++) { if (kind[e] == 2) qn = 0; qn++; if (e >= 2 && kind[e] == 0 && qn >= 3) skip += 3; }
             first += skip; count -= skip;
         }
-        if (count) native_mesh_draw(MM_ID0 + (u32)id, first, count, xf);
+        if (count) nd_mesh_draw_last(MM_ID0 + (u32)id, first, count, xf);
     }
     if (++mm_n_mesh % 100000 == 0) uya_log("native moby meshes: %u shapes, packets %llu as meshes, %llu as GIF data; clipping packets %llu, %llu as meshes", nmm, mm_n_mesh, mm_n_pk, mm_n50, mm_n50m);
     return 1;
@@ -867,15 +870,14 @@ static int mm_draw_clip(Ctx *c)
     xf[20] = c->off[0]; xf[21] = c->off[1]; xf[22] = c->off[2]; xf[23] = -3.4028235e38f;
     xf[28] = 0.0f; xf[29] = 0.0f; xf[30] = c->cscale[2]; xf[31] = c->cscale[3];   /* (the GPU cuts at the program's clip box: |z| <= w; x y: the screen's edges) */
     extern const char *uya_gs_src; uya_gs_src = "native moby clip";
-    u32 pa = 0; u64 pv = prim;
     for (int k = 0; k < ns; k++) {
+        u32 a[9]; u64 v[9]; int na = 0;
         if (k > 0) {
-            u32 a[8]; u64 v[8]; int na = mm_adn[k - 1];
+            na = mm_adn[k - 1];
             for (int j = 0; j < na; j++) { const u32 *q = mm_ad[k - 1][j]; a[j] = q[2] & 0xFF; v[j] = ((u64)q[1] << 32) | q[0]; }
-            native_regs(a, v, na);
         }
-        if (pre) native_regs(&pa, &pv, 1);
-        if (seg[2 * k + 1]) native_mesh_draw(MM_ID0 + (u32)id, seg[2 * k], seg[2 * k + 1], xf);
+        if (pre) { a[na] = 0; v[na++] = prim; }
+        if (na || seg[2 * k + 1]) nd_regs_mesh_draw(a, v, na, MM_ID0 + (u32)id, seg[2 * k], seg[2 * k + 1], xf);
     }
     return 1;
 }

@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include "native_dlist.h"
+#include "native_draw.h"
 static void sm_class(void);
 static void dec_check(const u8 *mem, u32 top);
 /* the shrub programs' memory for the direct draws (below): VU1's, which the other VU1 programs still
@@ -283,17 +284,22 @@ static int sm_draw_x(int sm_cur, const u32 (*ad)[4][4], const float R[4][4], s32
     xf[28] = 0.0f; xf[29] = 0.0f; xf[30] = 1e-30f; xf[31] = 1.0f;   /* (the GPU: no near or far cut but w > 0) */
     if (clip) { if (sc[2] == 0.0f) return 0; xf[28] = 1.0f; xf[30] = 1.0f / sc[2]; }   /* (the clip program's: z >= -w; x y: the screen's edges) */
     extern const char *uya_gs_src; uya_gs_src = clip ? "native shrub clip" : "native shrub";
+    /* a material block, and the draws after it (each with its PRIM): the block goes with the
+     * first draw; one with no draw after it is given on its own */
+    u32 a[5]; u64 v[5]; int na = 0;
     for (int k = 0; k < m->nop; k++) {
         const SmOp *o = &m->op[k];
         if (o->kind == 0) {
-            u32 a[4]; u64 v[4];
-            for (int j = 0; j < 4; j++) { const u32 *q = ad[o->blk][j]; a[j] = q[2] & 0xFF; v[j] = ((u64)q[1] << 32) | q[0]; }
-            native_regs(a, v, 4);
+            if (na) nd_regs_mesh_draw(a, v, na, id, 0, 0, xf);
+            na = 0;
+            for (int j = 0; j < 4; j++) { const u32 *q = ad[o->blk][j]; a[na] = q[2] & 0xFF; v[na++] = ((u64)q[1] << 32) | q[0]; }
         } else {
-            if (o->pre) { u32 a = 0; u64 v = o->prim; native_regs(&a, &v, 1); }
-            native_mesh_draw(id, o->first, o->count, xf);
+            if (o->pre) { a[na] = 0; v[na++] = o->prim; }
+            nd_regs_mesh_draw(a, v, na, id, o->first, o->count, xf);
+            na = 0;
         }
     }
+    if (na) nd_regs_mesh_draw(a, v, na, id, 0, 0, xf);
     if (++sm_n_mesh % 100000 == 0) { u32 bad = 0; for (u32 i = 0; i < nsm; i++) bad += !smt[i].ok; uya_log("native shrub meshes: %u classes (%u as packets), instances %llu as meshes, %llu as packets", nsm, bad, sm_n_mesh, sm_n_pk); }
     return 1;
 }

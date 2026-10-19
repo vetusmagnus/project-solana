@@ -91,6 +91,7 @@ static void uya_dma_sink(s32 ch, const void *data, u32 qwc)
 #include "../native/native_shrub.h"
 #include "../native/native_moby.h"
 #include "../native/native_part.h"
+#include "../native/native_2d.h"
 #include "../native/native_stripd.h"
 void uya_dma_vif1_replay(const u32 *q, int tte)
 {
@@ -140,6 +141,13 @@ s32 uyafn_12D938(void *chan, void *tag)
              * (host/src/native/native_mobyseg.c): drawn (1), or its first qword put back and read
              * again (2: the run goes through the chain); else the NEXT skips the run */
             /* particles from the native PartProc: a NEXT past its part (host/src/native/native_partproc.c) */
+            /* the game's 2D draws as host primitives (host/src/native/native_2d.c) */
+            if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_2D_MARK) {
+                native_terrain_flush();
+                int r = native_2d_tag(q, t);
+                if (r == 1) { t = addr; continue; }
+                if (r == 2) continue;
+            }
             /* DrawTfrag's transform packets as a record (host/src/native/native_tfragproc.c) */
             if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_TXFORM_MARK) {
                 native_terrain_flush();

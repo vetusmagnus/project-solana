@@ -77,11 +77,26 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_L06_00216B38": "uya_stripb_16b38",  # the ribbon (native_stripb.c; level 6)
               "func_L09_002C2B08": "uya_stripb_c2b08",  # the setup and a strip per entry (native_stripb.c; level 9)
               "func_L12_002BD3D0": "uya_stripb_bd3d0",  # the entry list of double strips (native_stripb.c)
-              "func_L01_00263338": "uya_stripl1"}       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+              "func_L01_00263338": "uya_stripl1",
+              "func_00234C98": "uya_addgsreg",      # VU1_addGSregister: a GS register as a packet (native_2d.c)
+              "func_00234D58": "uya_setscissor",    # VU1_setScissor (native_2d.c)
+              "func_00200468": "uya_hudsprite",     # HudSprite (native_2d.c)
+              "func_00200650": "uya_hudflip",       # HudSprite's quarter-turned strip (native_2d.c)
+              "func_002284E8": "uya_stencilclr",    # the shadows' stencil clear (native_2d.c)
+              "func_L00_001FD428": "uya_fogquad",
+              "func_001FB530": "uya_clearref",      # the screen clear's REF (native_2d.c)
+              "func_001F856C": "uya_fogfan",
+              "func_001F55C0": "uya_fadeset",      # a full-screen fade's REF (native_2d.c)
+              "func_001F5650": "uya_rectovl"}      # DrawRectOverlay (native_2d.c)        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
-HOST_HOOKS_ALLREFS = {"uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
+HOST_HOOKS_ALLREFS = {"uya_hudsprite", "uya_hudflip", "uya_clearref", "uya_addgsreg", "uya_setscissor", "uya_stencilclr", "uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
                       "uya_stripb_a52d0", "uya_stripb_16b38", "uya_stripb_c2b08", "uya_stripb_bd3d0"}
+# hooks whose references end with the routine's calls (each jal's target, in order)
+HOST_HOOKS_CALLS = {"uya_hudsprite", "uya_hudflip"}
+# hooks that also go on the other places the levels' catalogue gives their routine (a level names
+# AA_BlurPass's twin as a second place of the first; the hook tells them apart by their references)
+HOST_HOOKS_ALLPLACES = {"uya_blurpass"}
 _a = sys.argv[3:]
 while _a:
     _o = _a.pop(0)
@@ -96,6 +111,11 @@ RESIDENT = RC["resident"]   # PAL 0x0015F000
 # ---- inputs -----------------------------------------------------------------
 # testing: UYA_RC_TRACE="func_A,func_B" (build time) logs every call of those translated functions
 TRACE_FUNCS = set(x for x in os.environ.get("UYA_RC_TRACE", "").split(",") if x)
+# testing: UYA_RC_CWATCH=1 (build time) wraps every call with the chain watch (host/src/rac1/cwatch.c)
+CWATCH = bool(os.environ.get("UYA_RC_CWATCH"))
+def cw_wrap(call, tgt, pc):
+    if not CWATCH: return call
+    return "{ extern u32 rc_cw_pre(void), rc_cw_word(void); extern void rc_cw_post(u32, u32, u32, u32); u32 cws_ = rc_cw_pre(), cwb_ = rc_cw_word(); %s rc_cw_post(cws_, %s, 0x%08XU, cwb_); }" % (call, tgt, pc)
 EXE = os.environ.get("UYA_EXE") or os.path.join(REPO, "baserom", RC["exe"])   # build.py: the copy read from the disc image
 img = open(EXE, "rb").read()
 TEXT_LO = 0x00100080   # the executable's one loadable segment (PAL size 0x13E6B0)
@@ -787,15 +807,17 @@ def translate(name, rng=None, entries=None):
     else:
         out = ["void %s%s(RcCtx *c)\n{" % (P, name)]
     hook = HOST_HOOKS.get(name)
+    if not hook and HOST_HOOKS.get(base_of.get(name, "")) in HOST_HOOKS_ALLPLACES: hook = HOST_HOOKS[base_of[name]]
     if hook:
         # a game routine the host does natively (host/src/native): its hook gets the level's
         # data references, read from the routine's own bytes (gp offsets and lui/addiu pairs,
         # in order), and returns 1 when it did the routine
-        gofs, absv = [], []
+        gofs, absv, calls = [], [], []
         allrefs = hook in HOST_HOOKS_ALLREFS
         _ls = (0x23, 0x2B, 0x1E, 0x1F, 0x36, 0x3E, 0x37, 0x3F, 0x21, 0x25, 0x24, 0x20, 0x28, 0x29)
         for k, (pc, w) in enumerate(ins):
             op = w >> 26
+            if op == 3: calls.append(((pc + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2))
             if op != 15 and ((w >> 21) & 31) == 28 and (op in _ls or (allrefs and op in (0x31, 0x39, 0x09))):
                 gofs.append(w & 0xFFFF if (w & 0xFFFF) < 0x8000 else (w & 0xFFFF) - 0x10000)
             if op == 15 and allrefs:           # lui rt: the first addiu / load / store based on rt
@@ -810,6 +832,7 @@ def translate(name, rng=None, entries=None):
                     if (w2 >> 26) == 9 and ((w2 >> 16) & 31) == rt and ((w2 >> 21) & 31) == rt:
                         lo = w2 & 0xFFFF; lo = lo - 0x10000 if lo >= 0x8000 else lo
                         absv.append(((w & 0xFFFF) << 16) + lo & 0xFFFFFFFF); break
+        if hook in HOST_HOOKS_CALLS: absv += calls
         (out.insert if entries else (lambda _i, _x: out.append(_x)))(1, "    %s{ extern int %s_enter(RcCtx *, const s32 *, int, const u32 *, int); if (%s_enter(c, (const s32[]){%s}, %d, (const u32[]){%s}, %d)) return; }"
                    % ("if (entry == 0x%08X) " % va if entries else "", hook, hook, ", ".join("%d" % v for v in gofs), len(gofs), ", ".join("0x%08Xu" % v for v in absv), len(absv)))
     if name in TRACE_FUNCS:       # testing: UYA_RC_TRACE at build time (rc_trace logs the calls)
@@ -842,13 +865,13 @@ def translate(name, rng=None, entries=None):
             i += 2; continue
         if nm == "jalr":
             rs, rd = (w >> 21) & 31, (w >> 11) & 31
-            out.append("    { u32 tgt = (u32)%s; %s %s rc_dispatch(c, tgt); }" % (R(rs), W(rd, "0x%08XULL" % (pc + 8)), delay))
+            out.append("    { u32 tgt = (u32)%s; %s %s %s }" % (R(rs), W(rd, "0x%08XULL" % (pc + 8)), delay, cw_wrap("rc_dispatch(c, tgt);", "tgt", pc)))
             if has_delay and pc + 4 in labels: out.append("    if (0) { L_%08X:; %s }" % (pc + 4, delay))
             i += 2; continue
         if nm in ("jal", "j"):
             t = ((pc + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
             if nm == "jal":
-                out.append("    c->r[31].d[0] = 0x%08XULL; %s %s" % (pc + 8, delay, call_target(t)))
+                out.append("    c->r[31].d[0] = 0x%08XULL; %s %s" % (pc + 8, delay, cw_wrap(call_target(t), "0x%08XU" % t, pc)))
             elif va <= t < va + size:
                 out.append("    %s goto L_%08X;" % (delay, t))
             else:

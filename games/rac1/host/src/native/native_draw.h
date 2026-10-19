@@ -67,4 +67,7 @@ int nd_pass_from_regs(nd_pass *q, const u32 *addr, const u64 *val, int n);
 /* a renderer's packet as host draws: its blocks of register writes become materials and pass
  * settings where they are (ops 17, 18), its vertices stay as they are (native_dlist.c) */
 u32 nd_pack(const u32 *ops, u32 nq, u32 *out, u32 cap);
+/* one block of register writes as materials and pass settings (ops 17, 18), appended at out + *o
+ * (qwords; cap the room): 1 if every write is one of theirs */
+int nd_pack_regs(const u32 *addr, const u64 *val, int n, u32 *out, u32 *o, u32 cap);
 #endif

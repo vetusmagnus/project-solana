@@ -8,11 +8,18 @@
  *    Pixel (x, y) of the buffer is the sc x sc texels from (x*sc, y*sc) (no flip):
  *    sc is the upscale (UYA_SCALE, 1 = native). Transfers between GS memory and
  *    a target take one texel of each block (down) or fill the block (up).
- *  - coherence by 8 KB page: owner[p] is the target whose copy of page p is
- *    newer than vram (drawn on the GPU), and each target has valid[p] (its copy
- *    is current). A draw makes its pages valid (uploading from vram, after
- *    downloading other owners) and then owns them; CPU reads download owned
- *    pages; CPU writes download partly written ones and invalidate all copies.
+ *  - the targets are the game's buffers, host textures that live for the session (UYA_GLTGT, the
+ *    default: no eviction; a buffer set up over another one's memory with another width or format
+ *    retires it, its newer pages stored to vram first). They meet GS memory, where the textures live,
+ *    only at named points, in 8 KB pages: a buffer's first use takes its contents from vram (as the
+ *    PS2's buffer holds what was there); an upload into a buffer's memory stores the pages it partly
+ *    covers first, and the buffer takes them again before it is next drawn (RAC1: the boot screens'
+ *    and the level load's textures land in the Z buffer's memory); a texture, CLUT or readback of a
+ *    buffer's memory stores those pages first. owner[p] is the buffer newer than vram at page p,
+ *    valid[p] a buffer's copy being current. In gameplay none of this runs (level 3: syncs at vsync
+ *    1, at the boot's uploads and the level load's, none after); a buffer whose pages are all current
+ *    and its own skips the page bookkeeping. UYA_GLTGT=0: the earlier model, a cache of 24 targets
+ *    by address with LRU eviction, overlapping targets kept side by side.
  *  - primitives are batched per GS state (gs.c's state ring index) and drawn
  *    with one shader that does the GS pixel pipeline: texture fetch with the
  *    GS's wrap modes, nearest/bilinear and mip selection in integers (the
@@ -330,12 +337,13 @@ static int cls_of(u32 psm)
 typedef struct {
     int used; u32 bp, bw, cls; int w, ph, rows; GLuint tex; u32 lru;
     u8 valid[512];                       /* this copy of the page is current */
+    u32 loaded, owns;                    /* (UYA_GLTGT) the rows (bits) whose pages are all current; all newer than vram and its own */
 } tgt_t;
 static tgt_t tg[NTG];
 static signed char owner[512];          /* the target whose copy is newer than vram, or -1 */
 static u32 lru_clock;
 
-static struct { unsigned long long flushes, draws, prims, dl_pages, dl_reads, ul_pages, tex_ul, copies, late, atlas_resets; } st, st0;
+static struct { unsigned long long flushes, draws, prims, dl_pages, dl_reads, ul_pages, tex_ul, copies, late, atlas_resets, pg_skip, pg_work; } st, st0;
 
 /* GL objects */
 static GLuint prog, vao, vbo, prog_p, vao_p, prog_n;
@@ -390,6 +398,22 @@ static inline u32 tpage(const tgt_t *t, int col, int row) { return (t->bp / 32 +
 
 static void download(tgt_t *t, const u16 *pg, int n);
 static void fbo_forget(GLuint tex);
+static int htg = -1;                     /* UYA_GLTGT: 1 the game's buffers (the default), 0 a cache by address */
+static int ht_on(void) { if (htg < 0) { const char *e = getenv("UYA_GLTGT"); htg = e ? atoi(e) != 0 : 1; } return htg; }
+static unsigned long long n_retired, n_evicted;
+/* a target given up: its newer pages to vram first */
+static void tgt_drop(int i)
+{
+    tgt_t *t = &tg[i];
+    u16 pg[512]; int n = 0;
+    for (int p = 0; p < 512; p++) if (owner[p] == i) pg[n++] = (u16)p;
+    if (n) download(t, pg, n);
+    for (int p = 0; p < 512; p++) if (owner[p] == i) owner[p] = -1;
+    fbo_forget(t->tex);
+    p_glDeleteTextures(1, &t->tex);
+    for (int u = 0; u < 9; u++) if (gc.tex[u] == t->tex) gc.tex[u] = ~0u;
+    t->used = 0;
+}
 static tgt_t *tgt_get(u32 bp, u32 bw, int cls, const tgt_t *keep1, const tgt_t *keep2)
 {
     int fr = -1, lru = -1;
@@ -399,15 +423,20 @@ static tgt_t *tgt_get(u32 bp, u32 bw, int cls, const tgt_t *keep1, const tgt_t *
         if (t->bp == bp && t->bw == bw && t->cls == (u32)cls) { t->lru = ++lru_clock; return t; }
         if (t != keep1 && t != keep2 && (lru < 0 || t->lru < tg[lru].lru)) lru = i;
     }
+    if (ht_on()) {   /* a new buffer at another one's base (the same memory with another width or format): that one is retired */
+        for (int i = 0; i < NTG; i++) {
+            tgt_t *t = &tg[i];
+            if (!t->used || t == keep1 || t == keep2) continue;
+            if (t->bp == bp) {
+                if (n_retired++ < 8) uya_log("GL GS: buffer %04X/%u cls %d over buffer %04X/%u cls %u: that one retired", bp, bw, cls, t->bp, t->bw, t->cls);
+                tgt_drop(i);
+                if (fr < 0) fr = i;
+            }
+        }
+    }
     if (fr < 0) {                        /* evict the least recently used: its newer pages go to vram first */
-        tgt_t *t = &tg[lru];
-        u16 pg[512]; int n = 0;
-        for (int p = 0; p < 512; p++) if (owner[p] == lru) pg[n++] = (u16)p;
-        if (n) download(t, pg, n);
-        fbo_forget(t->tex);
-        p_glDeleteTextures(1, &t->tex);
-        for (int u = 0; u < 9; u++) if (gc.tex[u] == t->tex) gc.tex[u] = ~0u;
-        t->used = 0;
+        if (ht_on() && n_evicted++ < 4) uya_log("GL GS: more than %d buffers: %04X/%u evicted", NTG, tg[lru].bp, tg[lru].bw);
+        tgt_drop(lru);
         fr = lru;
     }
     tgt_t *t = &tg[fr];
@@ -486,7 +515,7 @@ static void download(tgt_t *t, const u16 *pg, int n)
     for (int i = 0; i < n; i++) {
         u32 k = (pg[i] - t->bp / 32) & 511;
         int row = (int)(k / t->bw), col = (int)(k % t->bw);
-        if (owner[pg[i]] == ti) owner[pg[i]] = -1;
+        if (owner[pg[i]] == ti) { owner[pg[i]] = -1; t->owns = 0; }
         st.dl_pages++;
         for (int yy = 0; yy < t->ph; yy++) {
             u32 y = (u32)(row * t->ph + yy);
@@ -563,6 +592,20 @@ static void download_any(const u16 *pg, int n, const u8 *skip)
     for (int o = 0; o < NTG; o++) if (cnt[o]) download(&tg[o], lst[o], cnt[o]);
 }
 
+/* a buffer's flags again: every page of its area current (loaded); newer than vram and its own (owns) */
+static void tgt_check(tgt_t *t)
+{
+    if (!ht_on()) return;
+    int ti = (int)(t - tg);
+    u32 ld = 0, ow = 0;
+    for (int r = 0; r < t->rows && r < 32; r++) {
+        int all = 1, own = 1;
+        for (int c = 0; c < (int)t->bw; c++) { u32 p = tpage(t, c, r); if (!t->valid[p]) all = 0; if (owner[p] != ti) own = 0; }
+        if (all) ld |= 1u << r;
+        if (own) ow |= 1u << r;
+    }
+    t->loaded = ld; t->owns = ow;
+}
 /* UYA_GL_STRICT=1: also when a texture reads memory another target owns past
  * what it draws (RAC1's frame copy reads a row of the Z buffer at
  * 6%, distant mip chains point level 0 at the display buffer), sync it through
@@ -571,13 +614,29 @@ static void download_any(const u16 *pg, int n, const u8 *skip)
 static int strict = -1, no_dl;
 static u8 *cover;                          /* pages the batch overwrites whole (no upload needed), or 0 */
 /* the target's copy of the pages under a rectangle (pixels, inclusive) made current */
+static void tgt_check(tgt_t *t);
+/* the rows (bits) of a buffer a rectangle's rows y0..y1 cover; 0 if past the 32 kept */
+static u32 rows_mask(const tgt_t *t, int y0, int y1)
+{
+    if (y0 < 0) y0 = 0;
+    if (y1 < y0) return 0;
+    int r0 = y0 / t->ph, r1 = y1 / t->ph;
+    if (r1 >= t->rows) r1 = t->rows - 1;
+    if (r1 >= 32 || r0 > r1) return 0;
+    return (r1 == 31 ? ~0u : ((1u << (r1 + 1)) - 1)) & ~((1u << r0) - 1);
+}
 static void ensure_valid(tgt_t *t, int x0, int y0, int x1, int y1)
 {
+    if (ht_on() && !no_dl && !cover) {   /* (every page of the rows the rectangle covers current) */
+        u32 m = rows_mask(t, y0, y1);
+        if (m && (t->loaded & m) == m) { st.pg_skip++; return; }
+    }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > t->w - 1) x1 = t->w - 1;
     if (y1 > t->rows * t->ph - 1) y1 = t->rows * t->ph - 1;
     if (x0 > x1 || y0 > y1) return;
+    st.pg_work++;
     int ti = (int)(t - tg);
     u16 pg[512]; int n = 0;
     for (int r = y0 / t->ph; r <= y1 / t->ph; r++)
@@ -587,21 +646,30 @@ static void ensure_valid(tgt_t *t, int x0, int y0, int x1, int y1)
             if (cover && cover[p] && !t->valid[p]) { t->valid[p] = 1; continue; }   /* overwritten whole: its old contents do not matter */
             if (!t->valid[p]) { pg[n++] = (u16)p; }
         }
-    if (!n) return;
+    if (!n) { tgt_check(t); return; }
     {   /* other targets' newer copies to vram first */
         u16 o[512]; int m = 0;
         for (int i = 0; i < n; i++) if (owner[pg[i]] >= 0 && owner[pg[i]] != ti) o[m++] = pg[i];
         if (m) { static char why[64]; snprintf(why, sizeof why, "pages for target %04X/%u cls %u", t->bp, t->bw, t->cls); dl_why = why; download_any(o, m, 0); }
     }
+    {   /* testing: UYA_GLDLLOG=1 also logs every upload of pages from GS memory into a target */
+        static int dbg = -1; if (dbg < 0) dbg = getenv("UYA_GLDLLOG") != 0;
+        if (dbg) uya_log("upload v%u: target %04X/%u cls %u, %d pages from %u", uya_frame_count(), t->bp, t->bw, t->cls, n, pg[0]); }
     for (int i = 0; i < n; i++) {
         u32 k = (pg[i] - t->bp / 32) & 511;
         upload_page(t, (int)(k % t->bw), (int)(k / t->bw));
         t->valid[pg[i]] = 1;
     }
+    tgt_check(t);
 }
 /* a draw wrote the pages under a rectangle */
 static void claim(tgt_t *t, int x0, int y0, int x1, int y1)
 {
+    if (ht_on()) {   /* (every page of the rows the rectangle covers already its own) */
+        u32 m = rows_mask(t, y0, y1);
+        if (m && (t->owns & m) == m) { st.pg_skip++; return; }
+    }
+    st.pg_work++;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > t->w - 1) x1 = t->w - 1;
@@ -611,9 +679,11 @@ static void claim(tgt_t *t, int x0, int y0, int x1, int y1)
         for (int c = x0 / 64; c <= x1 / 64; c++) {
             u32 p = tpage(t, c, r);
             if (owner[p] == ti) continue;
+            if (owner[p] >= 0) tg[(int)owner[p]].owns = 0;
             owner[p] = (signed char)ti;
-            for (int i = 0; i < NTG; i++) if (i != ti && tg[i].used) tg[i].valid[p] = 0;
+            for (int i = 0; i < NTG; i++) if (i != ti && tg[i].used && tg[i].valid[p]) { tg[i].valid[p] = 0; tg[i].loaded = 0; }
         }
+    tgt_check(t);
 }
 
 /* the vram pages under a rectangle of a buffer; full[i]: the rectangle covers the whole page */
@@ -851,8 +921,9 @@ void gsgl_cpu_write_rect(u32 psm, u32 bp, u32 bw, u32 x, u32 y, u32 w, u32 h)
     static char why[96]; snprintf(why, sizeof why, "CPU write psm %X bp %04X bw %u %u,%u %ux%u", psm, bp, bw, x, y, w, h); dl_why = why;
     download_any(pg, n, full);       /* pages the write only partly covers keep the rest */
     for (int i = 0; i < n; i++) {
+        if (owner[pg[i]] >= 0) tg[(int)owner[pg[i]]].owns = 0;
         owner[pg[i]] = -1;
-        for (int k = 0; k < NTG; k++) tg[k].valid[pg[i]] = 0;
+        for (int k = 0; k < NTG; k++) if (tg[k].valid[pg[i]]) { tg[k].valid[pg[i]] = 0; tg[k].loaded = 0; }
     }
 }
 
@@ -2056,10 +2127,10 @@ static tgt_t *disp_tgt(const gs_disp_t *d)
 void gsgl_stats(int n)
 {
     double k = n > 0 ? n : 1;
-    uya_log("GL GS (per vsync): %.0f prims, %.0f batches, %.0f draws, %.1f texture uploads (%.1f late), %.2f pages down (%.2f reads), %.2f up, %.2f copies, %.2f atlas resets",
+    uya_log("GL GS (per vsync): %.0f prims, %.0f batches, %.0f draws, %.1f texture uploads (%.1f late), %.2f pages down (%.2f reads), %.2f up, %.2f copies, %.2f atlas resets; buffer page work %.1f, skipped %.1f",
             (st.prims - st0.prims) / k, (st.flushes - st0.flushes) / k, (st.draws - st0.draws) / k, (st.tex_ul - st0.tex_ul) / k,
             (st.late - st0.late) / k, (st.dl_pages - st0.dl_pages) / k, (st.dl_reads - st0.dl_reads) / k, (st.ul_pages - st0.ul_pages) / k,
-            (st.copies - st0.copies) / k, (st.atlas_resets - st0.atlas_resets) / k);
+            (st.copies - st0.copies) / k, (st.atlas_resets - st0.atlas_resets) / k, (st.pg_work - st0.pg_work) / k, (st.pg_skip - st0.pg_skip) / k);
     st0 = st;
 }
 void gsgl_present(const gs_disp_t *d)

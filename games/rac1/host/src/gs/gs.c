@@ -2046,6 +2046,7 @@ static int st_dirty = 1, st_tme;
 static u32 st_epoch;
 static void st_dirty_force(void) { st_dirty = 1; }
 static unsigned long long gs_kicks_drawn;   /* (UYA_SRCSTATS) */
+unsigned long long uya_gs_kicks(void) { return gs_kicks_drawn; }
 static void vertex_kick(u32 X, u32 Y, u32 Z, u8 F, int draw)
 {
     gs_kicks_drawn += draw != 0;
@@ -2961,7 +2962,7 @@ static void host_prim(u8 kind, const vtx_t *a, const vtx_t *b, const vtx_t *c)
 static void gs_nd_prims(const nd_material *m, const u32 *w, u32 nv, u32 flags)
 {
     /* flags 1: the vertices have no ST (UV primitives): ST is what the GS holds; 2: no colour either:
-     * RGBA is what the GS holds, Q 1.0 (as the GIF tag leaves it) */
+     * RGBA is what the GS holds, Q 1.0 (as the GIF tag leaves it); 4: no UV: UV is what the GS holds */
     nd_apply(m);
     qreg = 1.0f;                                     /* (as a GIF tag leaves Q) */
     u32 cx = prmodecont ? BITS(prim, 9, 1) : BITS(prmode, 9, 1);
@@ -2974,7 +2975,7 @@ static void gs_nd_prims(const nd_material *m, const u32 *w, u32 nv, u32 flags)
             const u32 *a = w + i * 8;
             rgbaq = (u64)a[3] | (u64)a[6] << 32; memcpy(&qreg, &a[6], 4);
             if (!(flags & 1)) st = (u64)a[4] | (u64)a[5] << 32;
-            uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
+            if (!(flags & 4)) uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
             vertex_kick(a[0] & 0xFFFF, a[0] >> 16, a[1], (u8)a[2], 1);
         }
         return;
@@ -2989,7 +2990,8 @@ static void gs_nd_prims(const nd_material *m, const u32 *w, u32 nv, u32 flags)
         if (flags & 1) { u32 s_ = (u32)st, t_ = (u32)(st >> 32); memcpy(&v->s, &s_, 4); memcpy(&v->t, &t_, 4); }
         else { memcpy(&v->s, &a[4], 4); memcpy(&v->t, &a[5], 4); }
         if (flags & 2) v->q = 1.0f; else memcpy(&v->q, &a[6], 4);
-        v->u = (float)(a[7] & 0x3FFF) / 16.0f; v->v = (float)((a[7] >> 16) & 0x3FFF) / 16.0f;
+        u32 uvw = (flags & 4) ? (u32)(uv & 0x3FFF) | (u32)((uv >> 16) & 0x3FFF) << 16 : a[7];
+        v->u = (float)(uvw & 0x3FFF) / 16.0f; v->v = (float)((uvw >> 16) & 0x3FFF) / 16.0f;
     }
     u32 type = (u32)(prim & 7);
     static const u8 kind[8] = { 0, 1, 1, 3, 3, 3, 6, 0 };
@@ -3010,7 +3012,7 @@ static void gs_nd_prims(const nd_material *m, const u32 *w, u32 nv, u32 flags)
         if (flags & 2) qreg = 1.0f;
         else { rgbaq = (u64)a[3] | (u64)a[6] << 32; memcpy(&qreg, &a[6], 4); }
         if (!(flags & 1)) st = (u64)a[4] | (u64)a[5] << 32;
-        uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
+        if (!(flags & 4)) uv = (u64)(a[7] & 0x3FFF) | (u64)((a[7] >> 16) & 0x3FFF) << 16;
         static const u32 need[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
         u32 left;
         switch (type) {

@@ -74,3 +74,11 @@ What stays in any version that keeps the original look: the PS2's pixel arithmet
 not a model of the hardware's memory or registers; it would live in per-material shaders.
 
 Suggested order: 1 (largest share, narrowest features, cleanest to verify), then 2 and 3, then 4.
+
+## Where it stands (19 October, day)
+
+Items 1 and 2 are done for gameplay (the game's own GIF drawing: at most ~5 vertex kicks a vsync on any
+level, from hundreds; menus and cutscenes not surveyed). Item 3 is done as far as it goes without item 4:
+the GL targets are the game's buffers, kept for the session, and meet GS memory only at the measured
+points (a buffer's first use, the boot's and the level load's uploads into the Z buffer's memory); in
+gameplay none. Item 4 left alone. Details: overnight_2026-10-18.md, "Item 2 finished" and "Item 3".

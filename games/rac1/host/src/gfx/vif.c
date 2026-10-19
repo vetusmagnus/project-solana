@@ -297,7 +297,8 @@ static void exec(Vif *v, u32 code, const u32 *d, u32 n)
                         for (u32 j = 0; j < n && j < 64; j += 4) uya_log("   %08X: %08X %08X %08X %08X", (u32)(uintptr_t)(d + j), d[j], d[j + 1], d[j + 2], d[j + 3]);
                         break;
                     }
-            { void native_gif(int path, const u32 *d, u32 qwc); native_gif(1, d, n / 4); }
+            { void native_gif(int path, const u32 *d, u32 qwc); unsigned long long uya_gs_kicks(void); void uya_cw_direct(const u32 *, u32, unsigned long long);
+              unsigned long long k0 = uya_gs_kicks(); native_gif(1, d, n / 4); uya_cw_direct(d, n / 4, uya_gs_kicks() - k0); }
         }
         else bad_cmd(v, code);
         break;

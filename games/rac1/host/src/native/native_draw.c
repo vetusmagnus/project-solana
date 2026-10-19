@@ -236,6 +236,12 @@ static int pack_run(const u32 *addr, const u64 *val, int n, u32 *out, u32 *o, u3
     if (nm) { u32 *w = out + *o * 4; memset(w, 0, (1 + ND_QW) * 16); w[0] = 17; memcpy(w + 4, &m, sizeof m); *o += 1 + ND_QW; }
     return 1;
 }
+/* one block of register writes as materials and pass settings (ops 17, 18) at out + *o qwords: 1 if
+ * every write is one of theirs */
+int nd_pack_regs(const u32 *addr, const u64 *val, int n, u32 *out, u32 *o, u32 cap)
+{
+    return nd_mode() && pack_run(addr, val, n, out, o, cap);
+}
 u32 nd_pack(const u32 *ops, u32 nq, u32 *out, u32 cap)
 {
     if (!nd_mode()) return 0;

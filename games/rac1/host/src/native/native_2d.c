@@ -136,11 +136,21 @@ int native_2d_tag(const u32 *q, u32 t)
  * body's relocations, which name other words in another routine. A chain word is the chain
  * pointer's own (0x161000 in the executable, 0x161240 or 0x161280 in the levels), holding a
  * qword-aligned pointer into EE memory; anything else and the game's routine runs. */
+u32 uya_chain_word_seen;   /* (testing: the chain watch's chain word, UYA_CWATCH=auto) */
 static int chain_word_ok(u32 cw)
 {
     if ((cw & 0xFFFFF000u) != 0x161000u) return 0;
     u32 p = M32(cw);
-    return p >= 0x100000u && p < 0x2000000u && !(p & 15);
+    if (p >= 0x100000u && p < 0x2000000u && !(p & 15)) { uya_chain_word_seen = cw; return 1; }
+    return 0;
+}
+/* the chain word a routine reaches through gp: the executable's at gp - 0x5D00, the levels' at
+ * gp - 0x5AC0 or gp - 0x5A80 (their data moved), each the word chain_word_ok names */
+static u32 gp_chain_word(RcCtx *c, s32 g)
+{
+    if (g != -0x5D00 && g != -0x5AC0 && g != -0x5A80) return 0;
+    u32 cw = (u32)c->r[28].d[0] + (u32)g;
+    return chain_word_ok(cw) ? cw : 0;
 }
 /* a vertex: XYZ2 (x | y << 16 | z << 32, as the GS takes it), RGBAQ, UV (u | v << 16 in 1/16 texel) */
 static void vtx(u32 *w, u64 xyz, u64 rgbaq, u64 uv)
@@ -281,8 +291,8 @@ int uya_skyg_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     if (ng != 2 || g[0] != g[1]) { static int t; if (!t++) uya_log("native 2D sky: %d gp references (not 2, the chain pointer): the game's routine", ng); return 0; }
     u32 n = (u32)c->r[4].d[0];
     if (!n || n > 0x10000) return 0;
-    if (g[0] != -0x5D00) return 0;   /* (the chain pointer's gp word: checked, see chain_word_ok) */
-    u32 cwd = (u32)c->r[28].d[0] + (u32)g[0], T = M32(cwd);
+    u32 cwd = gp_chain_word(c, g[0]), T = cwd ? M32(cwd) : 0;   /* (the chain pointer's gp word: checked, see chain_word_ok) */
+    if (!cwd) return 0;
     if (T < 0x100000u || T >= 0x2000000u || (T & 15)) return 0;
     if (!sg_build(n, (u32)c->r[5].d[0], (u32)c->r[6].d[0], (u32)c->r[7].d[0], T)) return 0;
     sg_runs++;
@@ -291,7 +301,7 @@ int uya_skyg_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     for (u32 k = 0; k < sg_n; k++) rc_sw(T + 4 * k, sg_pk[k]);
     rc_sw(cwd, T + sg_n * 4);
     nd_material m; memset(&m, 0, sizeof m);
-    record(T, T + sg_n * 4, &m, sg_wv, sg_nv, 1);
+    record(T, T + sg_n * 4, &m, sg_wv, sg_nv, 1 | 4);
     return 1;
 }
 void uya_skyg_exit(RcCtx *c)
@@ -338,7 +348,7 @@ static int tx_build(RcCtx *c, const s32 *G, u32 n, u32 il, u32 stv, u32 vx, u32 
         u32 tb = M8(e + 3);
         if (f) continue;
         if (tb != cur) {
-            if (nv) { if (write) rec_op19(&mt, wv, nv, 0); nv = 0; }
+            if (nv) { if (write) rec_op19(&mt, wv, nv, 4); nv = 0; }
             u32 tbl = M32(M32(gp + (u32)G[0]) + 0x10), ent = tbl + tb * 16;
             u64 t0 = M64(ent);
             if (!t0) {   /* placed now (func_0022D6B4) */
@@ -378,7 +388,7 @@ static int tx_build(RcCtx *c, const s32 *G, u32 n, u32 il, u32 stv, u32 vx, u32 
             w[0] = xy; w[1] = 0; w[2] = 0; w[3] = rg; w[4] = sb; w[5] = tb2; w[6] = 0x3F800000u; w[7] = 0;
         }
     }
-    if (nv && write) rec_op19(&mt, wv, nv, 0);
+    if (nv && write) rec_op19(&mt, wv, nv, 4);
     if (write) { rc_sw(gp + (u32)G[1], alloc); rc_sw(gp + (u32)G[2], cnt); }
     u32 nq = (u32)(p - tx_pk) / 4;
     tx_n = nq * 4;
@@ -402,12 +412,15 @@ int uya_skyt_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
         return 0;
     }
     s32 tblo = g[2], allo = g[3], cnto = g[5];
-    if (g[0] != -0x5D00 || tblo != -0x67A4) return 0;   /* (checked, see chain_word_ok) */
+    /* (checked, see chain_word_ok): the executable's layout or the levels' (their sky table and upload
+     * count moved with their data; the upload list is each level's own) */
+    if (!gp_chain_word(c, g[0])) return 0;
+    if (!(g[0] == -0x5D00 && tblo == -0x67A4 && allo == -0x7D8C && cnto == -0x77A8 && a[0] == 0x18D140u) &&
+        !(g[0] != -0x5D00 && tblo == g[0] - 0xCA4 && allo == -0x7D8C && cnto == -0x77E8 && (a[0] & 0xFFFF007Fu) == 0x160000u)) return 0;
     s32 G[3] = { tblo, allo, cnto };
     u32 n = (u32)c->r[4].d[0];
     if (!n || n > 0x10000) return 0;
     u32 cwd = (u32)c->r[28].d[0] + (u32)g[0], T = M32(cwd);
-    if (T < 0x100000u || T >= 0x2000000u || (T & 15)) return 0;
     if (md == 1) { if (!tx_build(c, G, n, (u32)c->r[5].d[0], (u32)c->r[6].d[0], (u32)c->r[7].d[0], a[0], 0)) return 0; tx_chk_at = T; tx_chk = 1; return 0; }
     if (!tx_build(c, G, n, (u32)c->r[5].d[0], (u32)c->r[6].d[0], (u32)c->r[7].d[0], a[0], 1)) return 0;
     if (tx_n == 8) return 1;
@@ -477,7 +490,7 @@ static int sv_build(RcCtx *c, u32 cntw, u32 depw, u32 T0, int write)
             w[0] = (u32)(xyz & 0xFFFF) | (u32)((xyz >> 16) & 0xFFFF) << 16; w[1] = (u32)(xyz >> 32); w[2] = 0; w[3] = col;
             w[4] = M32(q); w[5] = M32(q + 4); w[6] = 0x3F800000u; w[7] = 0;
         }
-        if (write) rec_op19(&mq, wv, 4, 0);
+        if (write) rec_op19(&mq, wv, 4, 4);
         nq++;
     }
     u32 t0 = (u32)(p - h) / 4 - 1;
@@ -519,7 +532,7 @@ static int sv_build(RcCtx *c, u32 cntw, u32 depw, u32 T0, int write)
         hc[4] = 1; hc[5] = 0x24000000u; hc[6] = 1; hc[7] = 0;
         hc[8] = col; hc[9] = 0x3F800000u; hc[10] = 0x55; hc[11] = 0;
         hc[12] = nv | 0x8000; hc[13] = 0x24000000u; hc[14] = 0x52; hc[15] = 0;
-        if (write) { rec_begin(); rec_op19(&mc, wv, nv, 0); if (!rec_end(T2, T2 + (nv + 4) * 16)) return 0; }
+        if (write) { rec_begin(); rec_op19(&mc, wv, nv, 4); if (!rec_end(T2, T2 + (nv + 4) * 16)) return 0; }
     }
     sv_n = (u32)(p - sv_pk);
     return 1;
@@ -613,7 +626,7 @@ static int dk_build(RcCtx *c, u32 dims, u32 T, int write)
         nd_pass_from_regs(&q, &ta, &tv, 1);
         rec_pass(&q);
         nd_material m; memset(&m, 0, sizeof m); m.has = ND_PRIM; m.kind = 6; m.blend = 1; m.uv = 1;   /* PRIM 0x146 */
-        rec_op19(&m, wv, (u32)sc * 2, 1);
+        rec_op19(&m, wv, (u32)sc * 2, 1 | 4);
         rec_rgbaq((u32)col, (u32)(col >> 32));
         if (!rec_end(T, T + e * 4)) return 0;
     }
@@ -691,6 +704,7 @@ void uya_billboards_exit(RcCtx *c)
     const u64 regs = bb_regs();
     while (q < end) {
         u32 tag = M32(q), qwc = tag & 0xFFFF, id = (tag >> 28) & 7;
+        if (tag == 0x20000000u && M32(q + 8) == NATIVE_2D_MARK && M32(q + 4) > q && M32(q + 4) <= end) { q = M32(q + 4); continue; }   /* (a packet already a record: VU1_addGSregister's) */
         if (id != 1) { static int t; if (t < 3) { t++; uya_log("native 2D billboards: tag %08X %08X %08X %08X at %08X (not a CNT): stopped", tag, M32(q + 4), M32(q + 8), M32(q + 12), q); } return; }   /* (only CNT tags in its part of the chain) */
         u64 lo = M64(q + 16), hi = M64(q + 24);
         if (tag == 0x10000009u && !M32(q + 4) && !M32(q + 8) && M32(q + 12) == 0x50000009u &&
@@ -708,7 +722,7 @@ void uya_billboards_exit(RcCtx *c)
                 }
                 rec_begin(); rec_op19(&m, wv, 4, 1);
                 if (rec_end(q, q + 16 * (qwc + 1))) bb_made++;
-            } else bb_other++;
+            } else { bb_other++; static int t; if (t < 4) { t++; uya_log("native 2D billboards: a material not taken: CLAMP %016llX TEX0 %016llX PRIM %016llX", (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2]); } }
         } else {
             bb_other++;
             static int t; if (t < 4 && tag != 0x10000002u) { t++; uya_log("native 2D billboards: a packet as GIF data: %08X %08X %08X %08X / %016llX %016llX", tag, M32(q + 4), M32(q + 8), M32(q + 12), (unsigned long long)lo, (unsigned long long)hi); }
@@ -775,7 +789,7 @@ static int bl_parse(u32 tb, u32 qwc, int write)
             o[0] = (u32)(x & 0xFFFF) | (u32)((x >> 16) & 0xFFFF) << 16; o[1] = (u32)((x >> 32) & 0xFFFFFF); o[2] = (u32)(x >> 56); o[3] = (u32)rg;
             o[4] = 0; o[5] = 0; o[6] = (u32)(rg >> 32); o[7] = 0;
         }
-        rec_op19(&ml, lw, 2, 1);
+        rec_op19(&ml, lw, 2, 1 | 4);
     }
     return 1;
 }
@@ -784,10 +798,11 @@ static int bl_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na, u32 qw
     int md = n2d_mode();
     if (md != 2) return 0;
     /* the chain word and the table (absolute), the second chain pointer (gp: the routine leaves it the new pointer too) */
-    if (na < 6 || ng < 1 || g[0] != -0x5D00) return 0;
+    if (na != 6 || ng != 1) return 0;
     u32 cw = a[0], tb = a[1];
-    if (!chain_word_ok(cw) || a[2] != cw || a[3] != cw || a[4] != cw || a[5] != cw || (tb != 0x151A00u && tb != 0x151C60u)) return 0;
-    if ((qwc == 0x26) != (tb == 0x151A00u)) return 0;   /* (the twin's table with the other's size: a shared body: the game's routine) */
+    if (gp_chain_word(c, g[0]) != cw || a[2] != cw || a[3] != cw || a[4] != cw || a[5] != cw || (tb != 0x151A00u && tb != 0x151C60u)) return 0;
+    /* (the levels name the twin as a copy of the first, sharing its body: the size goes with the table) */
+    qwc = tb == 0x151A00u ? 0x26 : 0x29;
     if (!bl_parse(tb, qwc, 0)) { static int t; if (!t++) uya_log("native 2D frame copy: the table at %08X (%u qwords) is not the expected shape: GIF data", tb, qwc); return 0; }
     u32 T = M32(cw);
     rc_sw(T, 0x30000000u | qwc); rc_sw(T + 4, tb); rc_sw(T + 8, 0); rc_sw(T + 12, 0x50000000u | qwc);
@@ -803,3 +818,489 @@ int uya_blurpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { r
 int uya_blurpass2_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { return bl_enter(c, g, ng, a, na, 0x29); }
 void uya_blurpass_exit(RcCtx *c) { (void)c; }
 void uya_blurpass2_exit(RcCtx *c) { (void)c; }
+
+/* ---- the GS state helpers: VU1_addGSregister func_00234C98, VU1_setScissor func_00234D58 ----
+ * Each writes one register as a packet (a CNT 2 with DIRECT 2, an A+D GIF tag, the value and the
+ * register's address): VU1_addGSregister the register a0 with the value a1; VU1_setScissor SCISSOR_1
+ * from x0 x1 y0 y1 (a0-a3) clamped to the screen (the view's width and height, D_0013E600[0], [1]).
+ * Natively: the packet written as the game writes it, its place a marker, and the record the write
+ * as a pass setting or material (ops 17, 18); a register that is neither stays the game's packet. */
+static unsigned long long gr_made, gr_ok, gr_bad, gr_other;
+static u32 gr_pk[12], gr_chk_at, gr_chk;
+static int rec_regs(u32 addr, u64 val)
+{
+    if (!rb_ok) return 0;
+    u32 o = ring_at;
+    if (!nd_pack_regs(&addr, &val, 1, ring, &o, R_QW)) return 0;
+    ring_at = o;
+    return 1;
+}
+static void gr_build(u32 reg, u64 val)
+{
+    u32 *p = gr_pk;
+    p[0] = 0x10000002u; p[1] = 0; p[2] = 0; p[3] = 0x50000002u;
+    p[4] = 0x8001; p[5] = 0x10000000u; p[6] = 0xE; p[7] = 0;
+    p[8] = (u32)val; p[9] = (u32)(val >> 32); p[10] = reg; p[11] = 0;
+}
+static int gr_emit(u32 cw, u32 reg, u64 val, int md)
+{
+    u32 T = M32(cw);
+    gr_build(reg, val);
+    if (md == 1) { gr_chk_at = T; gr_chk = 1; return 0; }
+    if (ring_at + 64 > R_QW) ring_at = 0;
+    rec_begin();
+    if (!rec_regs(reg, val)) { gr_other++; return 0; }
+    for (int k = 0; k < 12; k++) rc_sw(T + 4 * (u32)k, gr_pk[k]);
+    rc_sw(cw, T + 0x30);
+    if (rec_end(T, T + 0x30)) gr_made++;
+    if ((gr_made & 0xFFFF) == 1) uya_log("native 2D GS settings: %llu as host settings, %llu registers left as packets", gr_made, gr_other);
+    return 1;
+}
+/* the chain word: every absolute reference the routine has is it */
+static u32 refs_one(const u32 *a, int na, int n0)
+{
+    if (na < n0) return 0;
+    for (int i = 1; i < n0; i++) if (a[i] != a[0]) return 0;
+    return chain_word_ok(a[0]) ? a[0] : 0;
+}
+int uya_addgsreg_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    int md = n2d_mode();
+    if (!md) return 0;
+    u32 cw = refs_one(a, na, na);
+    if (!cw || ng != 1 || gp_chain_word(c, g[0]) != cw) { static int t; if (!t++) uya_log("native 2D GS settings: %d references, %d through gp, not the chain word's: the game's routine", na, ng); return 0; }
+    return gr_emit(cw, (u32)c->r[4].d[0], c->r[5].d[0], md);
+}
+void uya_addgsreg_exit(RcCtx *c)
+{
+    (void)c;
+    if (!gr_chk) return;
+    gr_chk = 0;
+    if (!memcmp((const void *)RC_A(gr_chk_at), gr_pk, 48)) gr_ok++;
+    else if (gr_bad++ < 5) { const u32 *q = (const u32 *)RC_A(gr_chk_at); uya_log("native 2D GS settings check: game %08X %08X %08X %08X / %08X %08X %08X %08X, native %08X %08X %08X %08X", q[0], q[3], q[8], q[9], q[10], q[11], q[4], q[6], gr_pk[0], gr_pk[3], gr_pk[8], gr_pk[9]); }
+    if ((gr_ok + gr_bad) == 50 || (gr_ok + gr_bad) % 20000 == 0) uya_log("native 2D GS settings check: %llu compared, %llu identical, %llu differ", gr_ok + gr_bad, gr_ok, gr_bad);
+}
+int uya_setscissor_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    int md = n2d_mode();
+    if (!md) return 0;
+    /* the references: the view, then the chain word (12 times) */
+    if (na != 13 || a[0] != 0x13E600u) { static int t; if (!t++) uya_log("native 2D scissor: %d references (not the routine's): the game's routine", na); return 0; }
+    u32 cw = refs_one(a + 1, 12, 12);
+    if (!cw || ng != 1 || gp_chain_word(c, g[0]) != cw) return 0;
+    s32 x0 = (s32)c->r[4].d[0], x1 = (s32)c->r[5].d[0], y0 = (s32)c->r[6].d[0], y1 = (s32)c->r[7].d[0];
+    s32 W = (s32)M32(0x13E600u), H = (s32)M32(0x13E604u);
+    x0 = x0 < 0 ? 0 : x0; x1 = x1 > W - 1 ? W - 1 : x1;
+    y0 = y0 < 0 ? 0 : y0; y1 = y1 > H - 1 ? H - 1 : y1;
+    u64 v = (u64)(s64)x0 | ((u64)(s64)x1 << 16) | ((u64)(s64)y0 << 32) | ((u64)(s64)y1 << 48);
+    return gr_emit(cw, 0x40, v, md);
+}
+void uya_setscissor_exit(RcCtx *c) { uya_addgsreg_exit(c); }
+
+/* ---- HudSprite func_00200468 and its quarter-turned strip func_00200650 ----
+ * A level carries its own copies, the same but for the addresses in them (the HUD's data, the chain
+ * word, GetFrameTex): the hook's references give them (the recompiler adds the routine's calls after
+ * its data references, HOST_HOOKS_CALLS), and must have the routine's shape: the HUD data, the chain
+ * word six times, the view, the chain word twice, then GetFrameTex.
+ * a0 the HUD texture, a1-a3 x y w, t0 h, t1 alpha. The texture's entry (the HUD data's +0x24 table,
+ * by the index at +0x20) gives its size (1 << its +6, +7 bytes); GetFrameTex (the game's) gives its
+ * TEX0, placing it and queueing its upload the first time. The sprite: a CNT 5 with DIRECT 5, a REGLIST
+ * tag (TEX0, PRIM 0x156, RGBAQ 0x7F7F7F with the alpha, UV XYZ2 twice), the corners (x, y), (x+w, y+h)
+ * in 1/16 pixel with the view's offset less 8, Z the HUD data's +0xC; UV (0, 0), (tw * 16, th * 16).
+ * The strip: CNT 7, PRIM 0x154, four corners (x, y+h), (x, y), (x+w, y+h), (x+w, y) with UVs (tw, 0),
+ * (tw, th), (0, 0), (0, th). Natively: the packet written as the game writes it, its place a marker,
+ * the record the material (TEX0, PRIM) and the vertices. */
+static unsigned long long hs_made, hs_ok, hs_bad, hs_plain;
+static u32 hs_pk[32], hs_n, hs_chk_at, hs_chk;
+static u64 hud_xyz(s32 x, s32 y, s32 z)
+{
+    s32 ox = (s32)M32(0x13E610u), oy = (s32)M32(0x13E614u);
+    return (u64)(s64)(s32)((u32)x * 16u + (u32)ox - 8u) | ((u64)(s64)(s32)((u32)y * 16u + (u32)oy - 8u) << 16) | ((u64)(u32)z << 32);
+}
+static int hud_enter(RcCtx *c, int ng, const u32 *a, int na, int flip)
+{
+    int md = n2d_mode();
+    if (!md) return 0;
+    u32 cw = na == 11 ? a[1] : 0, ok = na == 11 && ng == 0 && a[7] == 0x13E600u && a[0] >= 0x100000u && a[0] < 0x2000000u;
+    for (int k = 1; ok && k < 10; k++) if (k != 7 && a[k] != cw) ok = 0;
+    if (!ok || !chain_word_ok(cw) || a[10] < 0x100000u || a[10] >= 0x2000000u || (a[10] & 3)) {
+        static int t[2]; if (t[flip] < 3) { t[flip]++; char b[300]; int o = 0; for (int k = 0; k < na && o < 280; k++) o += snprintf(b + o, sizeof b - o, " %08X", a[k]);
+            uya_log("native 2D HUD sprite%s: references%s, %d through gp (not the routine's): the game's routine", flip ? " (strip)" : "", b, ng); }
+        return 0;
+    }
+    u32 arena = a[0], gft = a[10];
+    { static int t; if (!t++) uya_log("native 2D HUD sprite: the HUD data %08X, the chain word %08X, GetFrameTex %08X", arena, cw, gft); }
+    s32 tex = (s32)c->r[4].d[0], x = (s32)c->r[5].d[0], y = (s32)c->r[6].d[0], w = (s32)c->r[7].d[0], h = (s32)c->r[8].d[0];
+    u64 al = c->r[9].d[0];
+    u32 e = M32(arena + 0x24) + (u32)((s32)(s16)M16(M32(arena + 0x20) + (u32)tex * 4 + 2) * 8);
+    u32 tw = 1u << (M8(e + 6) & 31), th = 1u << (M8(e + 7) & 31);
+    s32 z = (s32)M32(arena + 0xC);
+    /* the texture (the game's GetFrameTex: it places it and queues its upload) */
+    static R128 keep[32];   /* (the registers as the call found them: the game's routine runs after it in the check) */
+    memcpy(keep, c->r, sizeof keep);
+    rc_dispatch(c, gft);
+    u64 tex0 = c->r[2].d[0];
+    memcpy(c->r, keep, sizeof keep);
+    u64 rgba = (al << 24) | 0x7F7F7F;
+    u32 T = M32(cw);
+    u64 p[14]; u32 nq;
+    p[2] = tex0; p[4] = rgba;
+    u32 wv[4 * 8]; u32 nv;
+    if (!flip) {
+        p[0] = 0x7400000000008001ull; p[1] = 0x5353106; p[3] = 0x156;
+        p[5] = 0; p[6] = hud_xyz(x, y, z);
+        p[7] = (u64)(s64)(s32)((th << 20) + tw * 16); p[8] = hud_xyz(x + w, y + h, z); p[9] = 0;
+        nq = 5; nv = 2;
+        vtx(wv, p[6], rgba, p[5]); vtx(wv + 8, p[8], rgba, p[7]);
+    } else {
+        p[0] = 0xB400000000008001ull; p[1] = 0x53535353106ull; p[3] = 0x154;
+        p[5] = (u64)(s64)(s32)(tw * 16); p[6] = hud_xyz(x, y + h, z);
+        p[7] = (u64)(s64)(s32)((th << 20) + tw * 16); p[8] = hud_xyz(x, y, z);
+        p[9] = 0; p[10] = hud_xyz(x + w, y + h, z);
+        p[11] = (u64)(s64)(s32)(th << 20); p[12] = hud_xyz(x + w, y, z); p[13] = 0;
+        nq = 7; nv = 4;
+        for (int k = 0; k < 4; k++) vtx(wv + k * 8, p[6 + 2 * k], rgba, p[5 + 2 * k]);
+    }
+    hs_pk[0] = 0x10000000u | nq; hs_pk[1] = 0; hs_pk[2] = 0; hs_pk[3] = 0x50000000u | nq;
+    memcpy(hs_pk + 4, p, nq * 16);
+    hs_n = (nq + 1) * 4;
+    if (md == 1) {   /* check: the packet built aside; the game's routine writes its own (GetFrameTex has run: the routine's call finds the texture placed) */
+        hs_chk_at = T; hs_chk = 1;
+        return 0;
+    }
+    for (u32 k = 0; k < hs_n; k++) rc_sw(T + 4 * k, hs_pk[k]);
+    rc_sw(cw, T + hs_n * 4);
+    nd_material m; u32 ra2[2] = { 0x06, 0x00 }; u64 rv[2] = { tex0, p[3] };
+    if (!nd_material_from_regs(&m, ra2, rv, 2)) { hs_plain++; return 1; }   /* (the packet as GIF data) */
+    record(T, T + hs_n * 4, &m, wv, nv, 1);
+    if ((++hs_made & 0x3FFF) == 1) uya_log("native 2D HUD sprites: %llu as host draws, %llu as GIF data", hs_made, hs_plain);
+    return 1;
+}
+int uya_hudsprite_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { (void)g; return hud_enter(c, ng, a, na, 0); }
+int uya_hudflip_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { (void)g; return hud_enter(c, ng, a, na, 1); }
+void uya_hudsprite_exit(RcCtx *c)
+{
+    (void)c;
+    if (!hs_chk) return;
+    hs_chk = 0;
+    if (!memcmp((const void *)RC_A(hs_chk_at), hs_pk, hs_n * 4)) hs_ok++;
+    else if (hs_bad++ < 5) {
+        const u32 *g = (const u32 *)RC_A(hs_chk_at);
+        for (u32 k = 0; k < hs_n / 4; k++) if (memcmp(g + 4 * k, hs_pk + 4 * k, 16)) { uya_log("native 2D HUD sprite check: qword %u: game %08X %08X %08X %08X, native %08X %08X %08X %08X", k, g[4 * k], g[4 * k + 1], g[4 * k + 2], g[4 * k + 3], hs_pk[4 * k], hs_pk[4 * k + 1], hs_pk[4 * k + 2], hs_pk[4 * k + 3]); break; }
+    }
+    if ((hs_ok + hs_bad) == 50 || (hs_ok + hs_bad) % 2000 == 0) uya_log("native 2D HUD sprite check: %llu compared, %llu identical, %llu differ", hs_ok + hs_bad, hs_ok, hs_bad);
+}
+void uya_hudflip_exit(RcCtx *c) { uya_hudsprite_exit(c); }
+
+/* ---- func_002284E8: the shadows' stencil clear (asm) ----
+ * Before the volumes: ALPHA_1 0x64 (VU1_addGSregister's packet), then TEST_1 0x31001 (the alpha test
+ * passing nothing, failing pixels write the frame only: the target's alpha cleared), PRIM 0x146 and
+ * RGBAQ 0x7F808080, and full-height sprites one per 32 pixels of the display's width, as the darkening
+ * pass draws them. As host draws: the blend setting, the test setting (op 18), the sprites (op 19). */
+static unsigned long long sc_ok, sc_bad;
+static u32 sc_pk[4 * 170], sc_n, sc_chk_at, sc_chk;
+static int sc_build(u32 dims, u32 T, int write)
+{
+    s32 w = (s16)M16(dims + 0x150), h = (s16)M16(dims + 0x152);
+    s32 sc = (w > -1 ? w : w + 0x1F) >> 5;
+    if (sc <= 0 || sc > 150) return 0;
+    const u64 col = 0x7F808080ull;
+    u32 *p = sc_pk;
+    gr_build(0x42, 0x64); memcpy(p, gr_pk, 48); p += 12;
+    p[0] = ((u32)sc + 5) | 0x10000000u; p[1] = 0; p[2] = 0; p[3] = ((u32)sc + 5) | 0x50000000u;
+    p[4] = 1; p[5] = 0x10000000u; p[6] = 0xE; p[7] = 0;
+    p[8] = 0x31001; p[9] = 0; p[10] = 0x47; p[11] = 0;
+    p[12] = 0x8001; p[13] = 0x24000000u; p[14] = 0x10; p[15] = 0;
+    p[16] = 0x146; p[17] = 0; p[18] = (u32)col; p[19] = 0;
+    p[20] = (u32)sc | 0x8000; p[21] = 0x24000000u; p[22] = 0x44; p[23] = 0;
+    static u32 wv[150 * 2 * 8];
+    s32 by = h * 8 + 0x7FF0, ty = 0x8000 - h * 8, nh = -(w * 8);
+    s64 pty = (s64)ty << 16, pby = (s64)by << 16;
+    s32 lx = nh + 0x8000, rx = nh + 0x8200;
+    for (s32 i = 0; i < sc; i++) {
+        u64 a = (u64)((s64)lx | pty), b = (u64)((s64)rx | pby);
+        p[24 + i * 4] = (u32)a; p[25 + i * 4] = (u32)(a >> 32); p[26 + i * 4] = (u32)b; p[27 + i * 4] = (u32)(b >> 32);
+        vtx(wv + (i * 2) * 8, a, col, 0); vtx(wv + (i * 2 + 1) * 8, b, col, 0);
+        lx += 0x200; rx += 0x200;
+    }
+    sc_n = 12 + 24 + (u32)sc * 4;
+    if (write) {
+        if (ring_at + 256 > R_QW) ring_at = 0;
+        rec_begin();
+        if (!rec_regs(0x42, 0x64)) return 0;
+        if (!rec_end(T, T + 48)) return 0;
+        rec_begin();
+        nd_pass q; u32 ta = 0x47; u64 tv = 0x31001;
+        if (!nd_pass_from_regs(&q, &ta, &tv, 1)) return 0;
+        rec_pass(&q);
+        nd_material m; u32 pa = 0x00; u64 pv = 0x146;
+        if (!nd_material_from_regs(&m, &pa, &pv, 1)) return 0;
+        rec_op19(&m, wv, (u32)sc * 2, 1 | 4);
+        if (!rec_end(T + 48, T + sc_n * 4)) return 0;
+    }
+    return 1;
+}
+int uya_stencilclr_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    (void)c; (void)g; (void)ng;
+    int md = n2d_mode();
+    if (!md) return 0;
+    /* the references: the display's block, then the chain word (8 times) */
+    if (na != 9 || a[0] != 0x151880u) { static int t; if (!t++) uya_log("native 2D stencil clear: %d references (not the routine's): the game's routine", na); return 0; }
+    u32 cw = refs_one(a + 1, 8, 8);
+    if (!cw) return 0;
+    u32 T = M32(cw);
+    if (!sc_build(a[0], T, 0)) return 0;
+    if (md == 1) { sc_chk_at = T; sc_chk = 1; return 0; }
+    /* (the bytes first: the records put their markers on them) */
+    for (u32 k = 0; k < sc_n; k++) rc_sw(T + 4 * k, sc_pk[k]);
+    rc_sw(cw, T + sc_n * 4);
+    if (!sc_build(a[0], T, 1)) { static int t; if (!t++) uya_log("native 2D stencil clear: records not made: the packets go as GIF data"); }
+    return 1;
+}
+void uya_stencilclr_exit(RcCtx *c)
+{
+    (void)c;
+    if (!sc_chk) return;
+    sc_chk = 0;
+    if (!memcmp((const void *)RC_A(sc_chk_at), sc_pk, sc_n * 4)) sc_ok++;
+    else if (sc_bad++ < 5) {
+        const u32 *gm = (const u32 *)RC_A(sc_chk_at);
+        for (u32 k = 0; k < sc_n / 4; k++) if (memcmp(gm + 4 * k, sc_pk + 4 * k, 16)) { uya_log("native 2D stencil clear check: qword %u of %u: game %08X %08X %08X %08X, native %08X %08X %08X %08X", k, sc_n / 4, gm[4 * k], gm[4 * k + 1], gm[4 * k + 2], gm[4 * k + 3], sc_pk[4 * k], sc_pk[4 * k + 1], sc_pk[4 * k + 2], sc_pk[4 * k + 3]); break; }
+    }
+    if ((sc_ok + sc_bad) == 50 || (sc_ok + sc_bad) % 2000 == 0) uya_log("native 2D stencil clear check: %llu calls compared, %llu identical, %llu differ", sc_ok + sc_bad, sc_ok, sc_bad);
+}
+
+/* ---- func_L00_001FD428: a fogged, textured quad in perspective (asm, VU0; the levels' shared code) ----
+ * Its math is the game's own (VU0's divide, its clip test): the routine runs. When it draws (its clip
+ * test passed), it has written, through writeGSHeader's 12 qwords at `at`: an A+D tag with TEX1_1 and
+ * ALPHA_1, a REGLIST tag (CLAMP_1, TEX0_1, PRIM 0x7C: a fogged, blended, textured Gouraud strip, then
+ * ST, RGBAQ, XYZF2 for each of four vertices). At its return that packet, its fixed layout checked word
+ * for word, becomes a record: the settings (ops 17, 18) and the strip as host primitives. */
+static unsigned long long fq_made, fq_other;
+int uya_fogquad_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { (void)c; (void)g; (void)ng; (void)a; (void)na; return 0; }
+void uya_fogquad_exit(RcCtx *c)
+{
+    if (n2d_mode() != 2) return;
+    u32 at = (u32)c->r[1].d[0];
+    if (at < 0x100010u || at >= 0x2000000u || (at & 15)) return;
+    u32 T = at - 16, end = at + 0xC0, cw = 0;
+    static const u32 cws[3] = { 0x161000u, 0x161240u, 0x161280u };
+    for (int k = 0; k < 3; k++) if (M32(cws[k]) == end && chain_word_ok(cws[k])) cw = cws[k];
+    if (!cw || M32(T) != 0x1000000Cu || M32(T + 4) || M32(T + 8) || M32(T + 12) != 0x5000000Cu) { fq_other++; return; }
+    if (M64(at) != 0x2000000000000001ull || M64(at + 8) != 0xEE || M64(at + 0x18) != 0x14 || M64(at + 0x28) != 0x42 ||
+        M64(at + 0x30) != 0xF400000000008001ull || M64(at + 0x38) != 0x0412412412412068ull) { fq_other++; return; }
+    u32 ga[2] = { 0x14, 0x42 }; u64 gv[2] = { M64(at + 0x10), M64(at + 0x20) };
+    u32 ma[3] = { 0x08, 0x06, 0x00 }; u64 mv[3] = { M64(at + 0x40), M64(at + 0x48), M64(at + 0x50) };
+    nd_material m;
+    if (!nd_material_from_regs(&m, ma, mv, 3)) { fq_other++; return; }
+    u32 wv[4 * 8];
+    for (int k = 0; k < 4; k++) {
+        u32 q = at + 0x58 + 24 * (u32)k;
+        u64 st = M64(q), rgbaq = M64(q + 8), xyzf = M64(q + 16);
+        u32 *w = wv + k * 8;
+        w[0] = (u32)(xyzf & 0xFFFF) | (u32)((xyzf >> 16) & 0xFFFF) << 16; w[1] = (u32)(xyzf >> 32) & 0xFFFFFF; w[2] = (u32)(xyzf >> 56); w[3] = (u32)rgbaq;
+        w[4] = (u32)st; w[5] = (u32)(st >> 32); w[6] = (u32)(rgbaq >> 32); w[7] = 0;
+    }
+    if (ring_at + 64 > R_QW) ring_at = 0;
+    rec_begin();
+    u32 o = ring_at;
+    if (!nd_pack_regs(ga, gv, 2, ring, &o, R_QW)) { fq_other++; return; }
+    ring_at = o;
+    rec_op19(&m, wv, 4, 4);
+    if (rec_end(T, end)) fq_made++;
+    if ((fq_made & 0x3FFF) == 1) uya_log("native 2D fogged quads: %llu as host draws, %llu other packets", fq_made, fq_other);
+}
+
+/* ---- func_001FB530: the screen clear (a REF to the table at 0x152140, 21 qwords) ----
+ * The table (built once by func_001FAB40, its colour set by func_001FB448): an A+D tag with TEST_1, a
+ * PACKED tag with PRIM (a sprite) and RGBAQ (the clear colour), a REGLIST tag of sprites (two XYZ2 a
+ * qword: one per 32-pixel strip of the screen). Natively as the frame copy: the REF written as the
+ * game writes it, its place a marker; the record the test setting, the material and the sprites in
+ * the table's colour; the table kept with the record and compared again where the chain meets the
+ * marker (changed: GIF data). A table of any other shape stays GIF data. */
+static unsigned long long cl_made;
+static int cl_parse(u32 tb, u32 qwc, int write)
+{
+    if (M64(tb) != 0x1000000000000001ull || M64(tb + 8) != 0xE || M64(tb + 0x18) != 0x47) return 0;
+    if (M64(tb + 0x20) != 0x2400000000008001ull || M64(tb + 0x28) != 0x10) return 0;
+    u64 t3 = M64(tb + 0x40);
+    u32 n = (u32)(t3 & 0x7FFF);
+    if ((t3 & ~0x7FFFull) != 0x2400000000008000ull || M64(tb + 0x48) != 0x44 || n == 0 || 5 + n != qwc) return 0;
+    if (!write) return 1;
+    nd_pass ps; u32 ta = 0x47; u64 tv = M64(tb + 0x10);
+    if (!nd_pass_from_regs(&ps, &ta, &tv, 1)) return 0;
+    nd_material m; u32 pa = 0x00; u64 pv = M64(tb + 0x30);
+    if (!nd_material_from_regs(&m, &pa, &pv, 1)) return 0;
+    u64 col = M64(tb + 0x38);
+    static u32 wv[64 * 2 * 8];
+    if (n > 64) return 0;
+    for (u32 i = 0; i < n; i++) { vtx(wv + (2 * i) * 8, M64(tb + 0x50 + 16 * i), col, 0); vtx(wv + (2 * i + 1) * 8, M64(tb + 0x58 + 16 * i), col, 0); }
+    rec_pass(&ps);
+    rec_op19(&m, wv, 2 * n, 1 | 4);
+    return 1;
+}
+int uya_clearref_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    int md = n2d_mode();
+    if (md != 2) return 0;
+    /* the references: the chain word and the table (absolute; in some layouts the chain word through gp at the end) */
+    u32 cw = 0, tb = 0;
+    for (int i = 0; i < na; i++) {
+        if (a[i] == 0x152140u) { tb = a[i]; continue; }
+        if (!cw) cw = a[i];
+        else if (a[i] != cw) return 0;
+    }
+    if (!cw || !tb || ng > 1 || (ng == 1 && gp_chain_word(c, g[0]) != cw) || !chain_word_ok(cw)) {
+        static int t; if (t < 3) { t++; char b[300]; int o = 0; for (int k = 0; k < ng && o < 200; k++) o += snprintf(b + o, sizeof b - o, " %d", g[k]); for (int k = 0; k < na && o < 280; k++) o += snprintf(b + o, sizeof b - o, " %08X", a[k]);
+            uya_log("native 2D screen clear: references%s (not the routine's): the game's routine", b); }
+        return 0;
+    }
+    if (!cl_parse(tb, 0x15, 0)) { static int t; if (!t++) uya_log("native 2D screen clear: the table at %08X is not the expected shape: GIF data", tb); return 0; }
+    u32 T = M32(cw);
+    rc_sw(T, 0x30000015u); rc_sw(T + 4, tb); rc_sw(T + 8, 0); rc_sw(T + 12, 0x50000015u);
+    rc_sw(cw, T + 16);
+    if (ring_at + 256 > R_QW) ring_at = 0;
+    rec_begin();
+    if (!cl_parse(tb, 0x15, 1)) { rb_ok = 0; return 1; }
+    rec_snapshot(tb, 0x15);
+    if (rec_end(T, T + 16)) cl_made++;
+    return 1;
+}
+void uya_clearref_exit(RcCtx *c) { (void)c; }
+
+/* ---- func_001F856C: the fogged fans (asm, VU0; writeGSHeader's packets) ----
+ * Among what it draws, through writeGSHeader: a fan in perspective, its vertices projected with VU0
+ * (the routine runs). The packet: a REGLIST tag (PRIM, then ST RGBAQ XYZF2 of the first vertex), a
+ * REGLIST tag of the others (ST RGBAQ XYZF2 each). At its return the packets it wrote (from the chain
+ * pointer as it found it) are looked at: each of that layout, checked word for word, becomes a record
+ * (the primitive, the vertices); any other stays as it is. */
+static u32 fn_t0[3];
+static unsigned long long fn_made, fn_other;
+static const u32 fn_cws[3] = { 0x161000u, 0x161240u, 0x161280u };
+int uya_fogfan_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    (void)c; (void)g; (void)ng; (void)a; (void)na;
+    for (int k = 0; k < 3; k++) fn_t0[k] = M32(fn_cws[k]);
+    return 0;
+}
+void uya_fogfan_exit(RcCtx *c)
+{
+    (void)c;
+    if (n2d_mode() != 2) return;
+    u32 cw = 0;
+    static unsigned long long calls, nomove;
+    calls++;
+    for (int k = 0; k < 3; k++) { u32 e = M32(fn_cws[k]); if (e > fn_t0[k] && e - fn_t0[k] < 0x10000u && !(fn_t0[k] & 15) && chain_word_ok(fn_cws[k])) { if (cw) return; cw = fn_cws[k]; } }
+    if (!cw) { if (++nomove == 1000) uya_log("native 2D fogged fans: %llu returns, %llu with no packet", calls, nomove); return; }
+    u32 T = fn_t0[cw == 0x161000u ? 0 : cw == 0x161240u ? 1 : 2], E = M32(cw);
+    while (T < E) {
+        u32 tag = M32(T), qwc = tag & 0xFFFF;
+        if (tag == 0x20000000u && M32(T + 8) == NATIVE_2D_MARK && M32(T + 4) > T && M32(T + 4) <= E) { T = M32(T + 4); continue; }   /* (a packet already a record) */
+        if ((tag & 0xFFFF0000u) != 0x10000000u || M32(T + 4) || M32(T + 8) || M32(T + 12) != (0x50000000u | qwc) || T + 16 * (qwc + 1) > E) {
+            static int t; if (t < 3) { t++; uya_log("native 2D fogged fans: tag %08X %08X %08X %08X at %08X (from %08X to %08X): stopped", tag, M32(T + 4), M32(T + 8), M32(T + 12), T, fn_t0[cw == 0x161000u ? 0 : cw == 0x161240u ? 1 : 2], E); }
+            return;
+        }
+        u32 D = T + 16, nx = T + 16 * (qwc + 1);
+        { static int t; if (t < 3 && M64(D) == 0x4400000000000001ull) { t++; uya_log("native 2D fogged fans: a packet of %u qwords: %016llX %016llX, PRIM %016llX, tag %016llX %016llX", qwc, (unsigned long long)M64(D), (unsigned long long)M64(D + 8), (unsigned long long)M64(D + 0x10), (unsigned long long)M64(D + 0x30), (unsigned long long)M64(D + 0x38)); } }
+        u64 t2 = M64(D + 0x30);
+        u32 nv = (u32)(t2 & 0x7FFF) + 1;
+        if (M64(D) == 0x4400000000000001ull && M64(D + 8) == 0x4120 && (t2 & ~0x7FFFull) == 0x3400000000008000ull && M64(D + 0x38) == 0x412 &&
+            qwc == 3 + (3 * nv >> 1) && nv >= 3 && nv <= 256) {
+            nd_material m; u32 pa = 0x00; u64 pv = M64(D + 0x10);
+            static u32 wv[256 * 8];
+            if (nd_material_from_regs(&m, &pa, &pv, 1)) {
+                for (u32 k = 0; k < nv; k++) {
+                    u32 q = k ? D + 0x40 + 0x18 * (k - 1) : D + 0x18;
+                    u64 st = M64(q), rgbaq = M64(q + 8), xyzf = M64(q + 16);
+                    u32 *w = wv + k * 8;
+                    w[0] = (u32)(xyzf & 0xFFFF) | (u32)((xyzf >> 16) & 0xFFFF) << 16; w[1] = (u32)(xyzf >> 32) & 0xFFFFFF; w[2] = (u32)(xyzf >> 56); w[3] = (u32)rgbaq;
+                    w[4] = (u32)st; w[5] = (u32)(st >> 32); w[6] = (u32)(rgbaq >> 32); w[7] = 0;
+                }
+                if (ring_at + 1024 > R_QW) ring_at = 0;
+                rec_begin();
+                rec_op19(&m, wv, nv, 4);
+                if (rec_end(T, nx)) fn_made++;
+                if ((fn_made & 0x3FFF) == 1) uya_log("native 2D fogged fans: %llu as host draws, %llu other packets", fn_made, fn_other);
+            } else fn_other++;
+        }
+        T = nx;
+    }
+}
+
+/* ---- func_001F55C0: a full-screen fade (VU1_addGSregister RGBAQ, then a REF to the table at 0x13CD90) ----
+ * The table (20 qwords, built once): an A+D tag with TEST_1 and PRIM (a sprite), a REGLIST tag of
+ * sprites (two XYZ2 a qword); the colour the RGBAQ write before it left (Q 1.0 after the tags). At the
+ * routine's return its REF (the chain's last qword) becomes a marker; the record is the test setting
+ * and the sprites in the colour the GS holds; the table kept and compared again at the marker. */
+static unsigned long long fd_made;
+static int fade_parse(u32 tb, u32 qwc, int write)
+{
+    if (M64(tb) != 0x2000000000000001ull || M64(tb + 8) != 0xEE || M64(tb + 0x18) != 0x47 || M64(tb + 0x28) != 0x00) return 0;
+    u64 t2 = M64(tb + 0x30);
+    u32 n = (u32)(t2 & 0x7FFF);
+    if ((t2 & ~0x7FFFull) != 0x2400000000008000ull || M64(tb + 0x38) != 0x44 || n == 0 || n > 64 || 4 + n != qwc) return 0;
+    if (!write) return 1;
+    nd_pass ps; u32 ta = 0x47; u64 tv = M64(tb + 0x10);
+    if (!nd_pass_from_regs(&ps, &ta, &tv, 1)) return 0;
+    nd_material m; u32 pa = 0x00; u64 pv = M64(tb + 0x20);
+    if (!nd_material_from_regs(&m, &pa, &pv, 1)) return 0;
+    static u32 wv[64 * 2 * 8];
+    for (u32 i = 0; i < n; i++) { vtx(wv + (2 * i) * 8, M64(tb + 0x40 + 16 * i), 0, 0); vtx(wv + (2 * i + 1) * 8, M64(tb + 0x48 + 16 * i), 0, 0); }
+    rec_pass(&ps);
+    rec_op19(&m, wv, 2 * n, 1 | 2 | 4);
+    return 1;
+}
+int uya_fadeset_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { (void)c; (void)g; (void)ng; (void)a; (void)na; return 0; }
+void uya_fadeset_exit(RcCtx *c)
+{
+    (void)c;
+    if (n2d_mode() != 2) return;
+    static const u32 cws[3] = { 0x161000u, 0x161240u, 0x161280u };
+    for (int k = 0; k < 3; k++) {
+        if (!chain_word_ok(cws[k])) continue;
+        u32 T = M32(cws[k]) - 16;
+        if (M32(T) != 0x30000014u || M32(T + 8) || M32(T + 12) != 0x50000014u) continue;
+        u32 tb = M32(T + 4);
+        if (tb != 0x13CD90u || !fade_parse(tb, 0x14, 0)) continue;
+        if (ring_at + 256 > R_QW) ring_at = 0;
+        rec_begin();
+        if (!fade_parse(tb, 0x14, 1)) { rb_ok = 0; return; }
+        rec_snapshot(tb, 0x14);
+        if (rec_end(T, T + 16)) fd_made++;
+        return;
+    }
+}
+
+/* ---- func_001F5650: DrawRectOverlay (C in the decomp) ----
+ * y0 y1 x0 x1 and the colour: a CNT 5 with DIRECT 5, a REGLIST tag (from the template at D_00160920:
+ * PRIM, RGBAQ), PRIM 0x144 and the colour, a REGLIST tag (D_00160930's: four XYZ2), the corners at Z
+ * 0xFFFFF0. At the routine's return the packet (the chain's last six qwords), its layout checked,
+ * becomes a record: the strip in its colour. */
+static unsigned long long ro_made;
+int uya_rectovl_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { (void)c; (void)g; (void)ng; (void)a; (void)na; return 0; }
+void uya_rectovl_exit(RcCtx *c)
+{
+    (void)c;
+    if (n2d_mode() != 2) return;
+    static const u32 cws[3] = { 0x161000u, 0x161240u, 0x161280u };
+    for (int k = 0; k < 3; k++) {
+        if (!chain_word_ok(cws[k])) continue;
+        u32 T = M32(cws[k]) - 0x60, D = T + 16;
+        if (M32(T) != 0x10000005u || M32(T + 4) || M32(T + 8) || M32(T + 12) != 0x50000005u) continue;
+        u64 t1 = M64(D), t2 = M64(D + 0x20);
+        if ((t1 & 0xFFFF) != 0x8001 || ((t1 >> 58) & 3) != 1 || ((t1 >> 60) & 15) != 2 || M64(D + 8) != 0x10) continue;
+        if ((t2 & 0xFFFF) != 0x8004 || ((t2 >> 58) & 3) != 1 || ((t2 >> 60) & 15) != 1 || M64(D + 0x28) != 0x5) continue;
+        if ((t1 & 0x03FF7FFF0000ull) || (t2 & 0x03FF7FFF0000ull)) continue;   /* (no PRE/PRIM field, nothing else in the tags) */
+        u64 pr = M64(D + 0x10), col = M64(D + 0x18);
+        nd_material m; u32 pa = 0x00;
+        if (!nd_material_from_regs(&m, &pa, &pr, 1)) continue;
+        u32 wv[4 * 8];
+        for (int v = 0; v < 4; v++) vtx(wv + v * 8, M64(D + 0x30 + 8 * (u32)v), col, 0);
+        if (ring_at + 64 > R_QW) ring_at = 0;
+        rec_begin();
+        rec_op19(&m, wv, 4, 1 | 4);
+        if (rec_end(T, T + 0x60)) ro_made++;
+        return;
+    }
+}

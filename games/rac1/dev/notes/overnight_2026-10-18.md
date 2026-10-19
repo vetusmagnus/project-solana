@@ -414,3 +414,86 @@ from EE code). Research on each producer: piece7_research.md.
   native, the targets can be host objects (the back buffer, the display buffer, Z) with the boot and
   level-load overlap (loading textures in the Z buffer's memory) handled explicitly, and the page
   coherence code (owner / valid per 8 KB page) removed.
+
+## Item 2 finished: the remaining producers (19 October, day)
+
+- A census of who writes the game's GIF packets, per level (testing aid, host/src/rac1/cwatch.c): a
+  build made with UYA_RC_CWATCH=1 (tools/recomp.py) wraps every call in the translated code, and the
+  call that moved the VIF1 chain pointer over a packet owns it (the innermost); UYA_CWATCH=0 (or the
+  chain word, hex) and UYA_CWATCH_AT=a,b print, at vsync b, each writer's packets, qwords and drawn
+  vertex kicks a vsync. dev/scripts/cw_build.sh builds such a tree (~/solana-dev/rac1_cw).
+- What it showed (all 19 levels, walking): besides texture uploads (item 4) and state-only packets
+  (frame setup blocks, already pass settings), the game's own drawing came from: the sky's two emitters
+  and the frame copy (supposed native since last night, but the hooks' strict checks compared the gp
+  offsets with the executable's (-0x5D00): in the levels (-0x5AC0, -0x5A80) the game's routines ran;
+  the pixel tests passed because the fallback is the game's routine), the fogged quads
+  func_L00_001FD428 (up to 970 kicks a vsync on level 10), func_001F856C's fogged fans, the stencil
+  clear func_002284E8, the screen clear (func_001FB530's REF to the table at 0x152140), HudSprite
+  func_00200468 and its strip func_00200650; and the GS register packets of VU1_addGSregister and
+  VU1_setScissor.
+- Fixed: the checks now take the layout's own words (gp_chain_word: the chain word must be what gp
+  and the offset give; the sky's table and count offsets per layout); the levels name the frame copy's
+  twin as a second place of the first (func_001FB848__lNNat...): its hook goes on every place
+  (HOST_HOOKS_ALLPLACES) and the table gives the size.
+- New ports (native_2d.c): VU1_addGSregister and VU1_setScissor from their arguments (the write as a
+  pass setting or material, op 17/18); the stencil clear from its arguments; HudSprite and its strip
+  from their arguments (the levels' copies' addresses, GetFrameTex's among them, from the hook's
+  references: recomp.py now adds a routine's call targets for HOST_HOOKS_CALLS); the screen clear as
+  the frame copy (the table parsed when the REF is written, kept, compared again at the marker); the
+  fogged quads and fans when the routine returns (their VU0 math is the game's own): the packet's fixed
+  layout checked word for word, then a record.
+- op 19 flag 4: the vertices have no UV (UV is what the GS holds). Several ports (the sky, the shadow
+  volumes and caps, the darkening pass, the frame copy's line) left the GS's UV register (and with
+  flag 0 its ST) at 0 where the game's packets do not write them; no pixel showed it, but the register
+  image now matches.
+- build.py: UYA_SKIPGEN=1 compiles the host sources against the last build's generated code (a change
+  to host/src alone: seconds instead of ~45 minutes).
+- Also ported: the fade func_001F55C0 (VU1_addGSregister RGBAQ, then a REF to the table at 0x13CD90:
+  converted at its return, the table kept and compared at the marker) and DrawRectOverlay func_001F5650
+  (the subtitles' box; its fixed packet converted at its return).
+- A regression found and fixed on the way: VU1_addGSregister's records put markers inside the glow
+  billboards' part of the chain, and the billboards' walk stopped at the first one (most billboards went
+  back to GIF data; pixels identical, the fallback being exact). The walks (billboards, fans) now step
+  over markers.
+- After (census, all 19 levels walking, vsyncs 1450-1750, the build before the fade/overlay/billboard
+  fixes): the game's own drawing through GIF fell from hundreds of vertex kicks a vsync per level (level
+  10: ~1,400; level 3: ~490 after last night) to at most ~5, from: the billboards' walk (fixed since),
+  DrawRectOverlay and the fade (ported since), the sky's setup table (a REF to 0x13D1F0, A+D state, 1.3
+  kicks on levels 0, 12, 15), and writeGSHeader packets from rare callers (~1.4 kicks, 0.04 packets a
+  vsync). Not covered by the census: menus, cutscenes, boss fights.
+- Checks: UYA_N2D=1 on levels 1, 3, 6, 9, 10: every port with a check identical (quad, sky both, shadow
+  volumes, darkening pass, GS settings, stencil clear, HUD sprites). Software, all 19 levels, UYA_N2D=0 vs
+  default: 0 px (final build: all 0 in the parallel run); boot frames 0 px. GPU (Windows build), levels
+  1, 3, 9, 13: 0 px.
+
+## Item 3: the GL targets as the game's buffers (19 October, day)
+
+- Measured first (dev/scripts: gldl.sh, UYA_GLDLLOG=1 now also logs uploads into a target): over a whole
+  level 3 run on the GPU (boot, level load, walking) the targets meet GS memory at three places only:
+  vsync 1 (the frame buffer's first use takes its contents from GS memory), the boot screens' texture
+  uploads (vsyncs 26, 29) and the level load's (vsync 893) into the Z buffer's memory (45 uploads each:
+  the pages they partly cover read back first), and the Z buffer taking those pages again before it is
+  next drawn (vsync 918, with 8 pages of the second frame buffer). In gameplay: nothing (the one row
+  there is the GS recording's own snapshot, a testing aid). Three buffers in all: 0000 and 1000
+  (colour, PSMCT32, FBW 8) and 1E00 (Z).
+- So with the textures in GS memory (item 4, left alone), the targets' link to it is these uploads and
+  reads. The change (gs_gl.c, UYA_GLTGT: 1 the default, 0 the earlier model):
+  - the targets are the game's buffers, kept for the session: no LRU cache by address (the earlier
+    model evicted the least recently used of 24); a buffer set up at another one's base with another
+    width or format retires it (its newer pages stored first, logged; not seen in the runs);
+  - the meeting points with GS memory are the named ones above, nothing else;
+  - each buffer keeps, per row of pages, whether they are all current and all its own: a draw whose
+    rows are skips the page work before (ensure_valid) and after (claim). Level 3 walking on the GPU:
+    about 12,000 of these a vsync skipped, 5 done (draws reaching row 14 of the second frame buffer,
+    which is the Z buffer's first page), 0 pages moved.
+  - A first version took a buffer's whole texture (1024 rows) as its area: the two frame buffers then
+    "overlapped", retired each other every frame and lost 643 pixels on level 9 through GS memory; the
+    replay A/B caught it. Fixed: retirement only at the same base; the flags per row.
+- What stays and why: the buffers are named by the game's own description (FRAME/ZBUF: base, width,
+  format), which is the only name the game gives them; the 8 KB-page sync code stays for the uploads
+  into the Z buffer's memory at boot and load and for any read of a buffer's memory as a texture, CLUT
+  or readback, because those textures live in GS memory. Removing that needs item 4.
+- Checks (the same GS input replayed in WSL's GL, UYA_GLTGT=0 vs the default): levels 3 and 13 from
+  vsync 0 to 1000 (boot screens, the level load, the start of gameplay; dev/scripts/gl_replay_boot_ab.sh):
+  999 frames each, 0 px; levels 1, 3, 9, 13 walking (vsyncs 1560-1639): 0 px. The GPU A/B of the game side
+  (UYA_N2D=0 vs default) on the final build: 0 px on levels 1, 3, 9, 13.

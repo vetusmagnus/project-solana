@@ -40,6 +40,7 @@
 #include "rc.h"
 #include "uya_host.h"
 #include "native_terrain.h"
+#include "native_moby.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -163,6 +164,43 @@ static void light_entry(u32 s4, u32 t3, u32 t2, s32 Y, u32 *s2)
 static unsigned long long st_seen, st_occl, st_out, st_cross, st_clip, st_mode[32];
 /* direct: the draws go to native_terrain.c, a marker in the chain where a run of them starts */
 static int direct;
+/* DrawTfrag's transform packets as a record (native_terrain.h; UYA_NTFXFORM: 0 they stay in the chain,
+ * 1 the default) */
+#define TX_N 64
+static struct { u32 at, q0[4]; } tx[TX_N];
+static u32 tx_next;
+static int tx_mode = -1;
+static unsigned long long tx_made, tx_done, tx_back, tx_unknown;
+static int xform_shape(u32 mt)
+{
+    return M32(mt) == 0x10000004u && !M32(mt + 4) && M32(mt + 8) == 0x01000404u && M32(mt + 12) == 0x6C040005u &&
+           M32(mt + 0x50) == 0x10000004u && !M32(mt + 0x54) && M32(mt + 0x58) == 0x01000404u && M32(mt + 0x5C) == 0x6C04014Du;
+}
+static void xform_record(u32 mt)
+{
+    if (tx_mode < 0) { const char *e = getenv("UYA_NTFXFORM"); tx_mode = e ? atoi(e) : 1; uya_log("native TfragProc: DrawTfrag's transform packets %s (UYA_NTFXFORM)", tx_mode ? "as records" : "in the chain"); }
+    if (!tx_mode || !xform_shape(mt)) return;
+    u32 i = tx_next++ % TX_N;
+    tx[i].at = mt;
+    for (int k = 0; k < 4; k++) tx[i].q0[k] = M32(mt + 4 * (u32)k);
+    rc_sw(mt, 0x20000000u); rc_sw(mt + 4, mt + 0xA0); rc_sw(mt + 8, NATIVE_TXFORM_MARK); rc_sw(mt + 12, i);
+    tx_made++;
+}
+int native_tfrag_xform_tag(const u32 *q, u32 t)
+{
+    u32 i = q[3] % TX_N;
+    if (tx[i].at != t) { if (tx_unknown++ < 3) uya_log("native TfragProc: transform marker %u at %08X not known: skipped", q[3], t); return 0; }
+    for (int k = 0; k < 4; k++) rc_sw(t + 4 * (u32)k, tx[i].q0[k]);
+    tx[i].at = 0;
+    if (!xform_shape(t)) { tx_back++; return 2; }
+    for (u32 p = t; p != t + 0xA0; p += 0x50) {
+        uya_vif1_op_reg(M32(p + 8));
+        uya_vif1_op_unpack(M32(p + 12), (const u32 *)(uintptr_t)(p + 16), 16);
+    }
+    if (++tx_done % 1000 == 0) uya_log("native TfragProc: %llu transform records done, %llu back to the chain, %llu markers not known; made %llu", tx_done, tx_back, tx_unknown, tx_made);
+    return 1;
+}
+
 static int seg_open, reset_pending;
 static u32 kid = ~0u;
 static void mark(u32 *sp, u32 *fp)
@@ -229,6 +267,7 @@ static void run(RcCtx *c, const TfRefs *R)
             memcpy(k.c, (void *)(uintptr_t)(R->tmpl + 0x10), 15 * 16);
             kid = native_terrain_consts(&k);
             lazy = native_terrain_ready(M32(SPR + 0x3F10));
+            if (lazy) xform_record(mt);
         } else { static int told; if (!told++) uya_log("native TfragProc: the chain's transform or template is not as expected: the draws go into the chain"); }
     }
     lazy = lazy && direct;

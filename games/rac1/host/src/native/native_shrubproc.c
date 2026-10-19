@@ -169,6 +169,87 @@ static void copyq(u32 src, int n, u32 *sp, u32 *fp, u64 *v0h, u64 *v1h, u64 *a0h
     *sp += 16 * (u32)n; *fp += 16 * (u32)n;
     if (v0h) { *v0h = v[0].d[1]; *v1h = v[1].d[1]; *a0h = v[2].d[1]; }
 }
+/* ---- the chain start as a record (direct mode; UYA_SSTARTREC: 0 the chain, 1 check, 2 records) ----
+ * The start's 5 chain qwords, in the game's template: CNT 3 (VIF STCYCL 4/4, UNPACK V4-32 3 at VU 0,
+ * the 3 constants inline), CNT 0 (MSCALF 0, FLUSHE), after a REF to the program's MPG packet. With
+ * that template, one marker takes their place, and at the marker the record does the same, in the
+ * same order: the MPG, STCYCL, the unpack (the constants as the chain had them), the start (the
+ * program's 0x0000: native_shrub_run, as the VIF ran it). The records' R_START (native_shrub.c)
+ * stays as it was. Check mode: the record, then the original qwords through the VIF from the same
+ * state; VIF1's state and VU1 data memory compared. */
+#include "native_moby.h"
+void vu_mpg(int vu, u32 addr, const u32 *w, u32 ninstr);
+void uya_dma_vif1_replay(const u32 *q, int tte);
+#define SS_N 64
+static struct { u32 q[20]; u32 mpg_addr, mpg_qwc; } ss_rec[SS_N];
+static u32 ss_next;
+static int ss_mode = -1;
+static unsigned long long ss_n, ss_bad, ss_mpgbad;
+static int sstart_template_ok(u32 c)
+{
+    return M32(c) == 0x10000003u && M32(c + 8) == 0x01000404u && M32(c + 12) == 0x6C030000u &&
+           M32(c + 0x40) == 0x10000000u && M32(c + 0x48) == 0x15000000u && M32(c + 0x4C) == 0x10000000u;
+}
+static void emit_sstart_rec(u32 qwc_at, u32 data, u32 consts, u32 *sp, u32 *fp)
+{
+    u32 i = ss_next++ % SS_N;
+    for (int k = 0; k < 20; k++) ss_rec[i].q[k] = M32(consts + 4 * (u32)k);
+    ss_rec[i].mpg_addr = data; ss_rec[i].mpg_qwc = M16(qwc_at);
+    sq_(*sp, &ZQ);
+    rc_sw(*sp, 0x10000000u); rc_sw(*sp + 8, NATIVE_SSTART_MARK); rc_sw(*sp + 12, i);
+    *sp += 0x10; *fp += 0x10;
+}
+/* the MPG packet's uploads (FLUSH, FLUSHE, FLUSHA, NOP codes and MPGs only; 0 if it has anything else) */
+static int sapply_mpg(u32 addr, u32 qwc)
+{
+    const u32 *w = (const u32 *)RC_A(addr);
+    u32 n = qwc * 4, i = 0;
+    while (i < n) {
+        u32 code = w[i], cmd = (code >> 24) & 0x7F;
+        if (cmd == 0x00 || cmd == 0x10 || cmd == 0x11 || cmd == 0x13) { i++; continue; }
+        if (cmd != 0x4A) return 0;
+        u32 num = (code >> 16) & 0xFF; if (!num) num = 256;
+        if (i + 1 + num * 2 > n) return 0;
+        vu_mpg(1, (code & 0xFFFF) * 8, w + i + 1, num);
+        i += 1 + num * 2;
+    }
+    return 1;
+}
+static void sapply_start(u32 i)
+{
+    const u32 *c = ss_rec[i].q;
+    if (!sapply_mpg(ss_rec[i].mpg_addr, ss_rec[i].mpg_qwc)) { if (ss_mpgbad++ < 3) uya_log("native ShrubProc: the start's MPG packet at %08X has other codes", ss_rec[i].mpg_addr); }
+    uya_vif1_op_reg(c[2]);                                  /* STCYCL 4/4 */
+    uya_vif1_op_unpack(c[3], c + 4, 3 * 4);                 /* VU 0..2 */
+    uya_vif1_op_mscal((c[18] & 0xFFFF) * 8);                /* MSCALF 0 (FLUSHE after it: nothing to wait for here) */
+}
+int native_shrub_start_tag(const u32 *q)
+{
+    u32 i = q[3] % SS_N;
+    if (ss_mode != 1) { sapply_start(i); ss_n++; return 1; }
+    static u8 m0[0x4000], ma[0x4000]; u8 *vu = (u8 *)(uintptr_t)0x1100C000u;
+    UyaVifState s0, sa, sb;
+    uya_vif1_get_state(&s0); memcpy(m0, vu, sizeof m0);
+    sapply_start(i);
+    uya_vif1_get_state(&sa); memcpy(ma, vu, sizeof ma);
+    uya_vif1_set_state(&s0); memcpy(vu, m0, sizeof m0);
+    const u32 *c = ss_rec[i].q;
+    u32 mq[4] = { 0x30000000u | ss_rec[i].mpg_qwc, ss_rec[i].mpg_addr, 0, 0 };
+    uya_dma_vif1_replay(mq, 1);
+    uya_dma_vif1_replay(c, 1); uya_dma_vif1_replay(c + 16, 1);
+    uya_vif1_get_state(&sb);
+    ss_n++;
+    sa.need = sb.need;
+    int dv = memcmp(&sa, &sb, sizeof sa) != 0, dm = memcmp(ma, vu, sizeof ma) != 0;
+    if ((dv || dm) && ss_bad++ < 10) {
+        u32 q0 = 0; while (q0 < 0x400 && !memcmp(ma + q0 * 16, vu + q0 * 16, 16)) q0++;
+        uya_log("native ShrubProc start check: run %llu differs: VIF state %s (TOPS %03X/%03X TOP %03X/%03X DBF %u/%u), VU memory %s (first qword %03X)",
+                ss_n, dv ? "differs" : "same", sa.tops, sb.tops, sa.top, sb.top, sa.dbf, sb.dbf, dm ? "differs" : "same", q0);
+    }
+    if (ss_n % 200 == 0) uya_log("native ShrubProc start check: %llu starts, %llu differ", ss_n, ss_bad);
+    return 1;
+}
+
 /* a REF to an MPG packet (qwc at q, data after it) */
 static void emit_mpg(u32 qwc_at, u32 data, u32 *sp, u32 *fp)
 {
@@ -415,8 +496,23 @@ static void run(RcCtx *c, const ShRefs *R)
       dshr = 0; dshr_ok = 0; seg_open = 0; seg_started = 0;
       if (dchk_on < 0) dchk_on = getenv("UYA_SHRUBDCHK") != 0;
       if (direct || dec_test || dchk_on) { int ok = direct_ok(v, R, gp); dshr_ok = ok; dshr = ok && direct && !dec_test && !dchk_on; if (direct && !dec_test) { if (dshr) st_ddirect++; else st_dchain++; } } }
-    emit_mpg(R->mpg_qwc, R->mpg_addr, &sp, &fp);
-    copyq(R->consts, 5, &sp, &fp, &v0h, &v1h, &a0h);
+    {   /* testing: UYA_SSTARTLOG=1: the chain start's words, once */
+        static int left = -1; if (left < 0) left = getenv("UYA_SSTARTLOG") ? 1 : 0;
+        if (left > 0) {
+            left--;
+            uya_log("ShrubProc start: MPG qwc %u at %08X; consts at %08X, head at %08X:", M16(R->mpg_qwc), R->mpg_addr, R->consts, R->head);
+            for (int k = 0; k < 5; k++) uya_log("   %08X %08X %08X %08X", M32(R->consts + 16 * k), M32(R->consts + 16 * k + 4), M32(R->consts + 16 * k + 8), M32(R->consts + 16 * k + 12));
+            for (int k = 0; k < 3; k++) uya_log("   head %08X %08X %08X %08X", M32(R->head + 16 * k), M32(R->head + 16 * k + 4), M32(R->head + 16 * k + 8), M32(R->head + 16 * k + 12));
+        }
+    }
+    if (ss_mode < 0) { const char *e = getenv("UYA_SSTARTREC"); ss_mode = e ? atoi(e) : 2; }
+    if (dshr && ss_mode > 0 && sstart_template_ok(R->consts)) {
+        emit_sstart_rec(R->mpg_qwc, R->mpg_addr, R->consts, &sp, &fp);
+        v0h = M64(R->consts + 8); v1h = M64(R->consts + 0x18); a0h = M64(R->consts + 0x28);   /* (as copyq leaves them) */
+    } else {
+        emit_mpg(R->mpg_qwc, R->mpg_addr, &sp, &fp);
+        copyq(R->consts, 5, &sp, &fp, &v0h, &v1h, &a0h);
+    }
     rc_sw(SPR + 0x3F90, fp);
     fp += 0x10; sq_(sp, &ZQ); sp += 0x10;
     copyq(R->head, 3, &sp, &fp, &v0h, &v1h, &a0h);
@@ -817,13 +913,15 @@ static void run(RcCtx *c, const ShRefs *R)
     copyq(R->head2, 3, &sp, &fp, &v0h, &v1h, &a0h);
     int clip = M32(SPR + 0x3F74) != SPR + 0x3D00;
     if (clip) {
-        emit_mpg(R->mpg2_qwc, R->mpg2_addr, &sp, &fp);
+        /* direct: the MPG (UYA_SSTARTREC > 0), the constants and the clip program's start in the records */
+        if (ss_mode < 0) { const char *e = getenv("UYA_SSTARTREC"); ss_mode = e ? atoi(e) : 2; }
+        int cmpg = dshr && ss_mode > 0;
+        if (!cmpg) emit_mpg(R->mpg2_qwc, R->mpg2_addr, &sp, &fp);
         if (dshr) {
-            /* direct: the constants and the clip program's start in the records (the MPG stays) */
             R128 v[3]; for (int k = 0; k < 3; k++) rc_lq(&v[k], R->consts2 + 16 * (u32)k);
             v0h = v[0].d[1]; v1h = v[1].d[1]; a0h = v[2].d[1];
             seg_open = 0; mark(&sp, &fp);
-            native_shrub_seg_cstart(R->consts2 + 0x10);
+            native_shrub_seg_cstart(R->consts2 + 0x10, cmpg ? R->mpg2_addr : 0, cmpg ? M16(R->mpg2_qwc) : 0);
         } else copyq(R->consts2, 8, &sp, &fp, &v0h, &v1h, &a0h);
         lqc2(28, R->cam3 + 0xC0); lqc2(29, R->cam3 + 0xD0); lqc2(30, R->cam3 + 0xE0); lqc2(31, R->cam3 + 0xF0);
         rc_sw(SPR + 0x3FA0, R->ret2);

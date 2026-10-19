@@ -177,3 +177,110 @@ program starts, between those vsyncs), per DMA send:
 VU1 starts per send (level 3): 221571 (effects) 8, 57843 (effects) 5, 13507 at 0x0040 (tie) 2, 56467 at
 0x0000 (shrub) 1, 224979 at 0x0040 (tie clip) 1.3. VU0: image 28259, about 1280 runs per send (micro mode,
 from EE code). Research on each producer: piece7_research.md.
+
+## Piece 7, step 1: the tie and shrub chain starts as records (18 October, night)
+
+- vif.c: VIF1 operations for records (uya_vif1_op_reg / _strow / _unpack / _mscal): the VIF's own effects,
+  called by a record in its order, no VIF codes decoded, not counted as chain commands.
+- TieProc (direct mode): its chain start (MPG REF; STMOD, UNPACK 9 at VU 966; MSCAL 0x40; STROW; BASE 0,
+  OFFSET 0x2C, STMOD 0, STCYCL 4/4; FLUSHA) becomes one marker (NATIVE_TSTART_MARK) and a record that
+  does the same at the marker, the REF's data read when the chain is walked. UYA_TSTARTREC 0/1/2.
+- ShrubProc (direct mode): its start (MPG REF; STCYCL 4/4, UNPACK 3 at VU 0; MSCALF 0) the same way
+  (NATIVE_SSTART_MARK, UYA_SSTARTREC 0/1/2). The records' R_START stays as it was.
+- Check mode (record applied, then the original qwords through the VIF from the same state; VIF1 state
+  and VU1 memory compared): tie 1000 of 1000 starts identical on levels 0, 3, 5, 13; shrub 800 of 800 on
+  levels 3 and 13.
+- Pixels: software, all 19 levels walking, 0 px against UYA_TSTARTREC=0 UYA_SSTARTREC=0; GL on the GPU
+  (gl_ab_win.sh), levels 0, 3, 13, 0 px.
+- Census (level 3, per send): MPG 32 -> 22 (15k -> 10k words), program starts from the chain 17.7 ->
+  14.7, V4-32 unpacks 24.6 -> 21.6. Left: the particles (221571), the strips (57843), the tie clip start
+  (224979, GL only), the remaining MPGs of those.
+- The tie clip part's start (GL, when the clip part goes direct) as a record too: CNT 2 with DIRECT 2
+  (A+D, sent through native_gif), REF 10 (UNPACK at VU 966), MSCAL 0x40 (the clip program's setup, 224979,
+  still run at the marker: it leaves registers and the strip-tag templates other programs read), STROW,
+  BASE/OFFSET/STMOD/STCYCL, FLUSHA. Emitted before TieProc knows the part goes direct, so its 10 qwords are
+  taken back out of the scratchpad (nothing is flushed between) and a marker written instead. Check mode
+  on the GPU (levels 3, 13): 2000 tie starts (main and clip) each, 0 differ; GL pixels 0 on levels 0, 3, 13.
+- PartProc (221571, the particles): a word-for-word port with check mode is being drafted (agent), to be
+  integrated and then made direct.
+
+## Piece 7, step 2: the particles native and direct (18 October, night)
+
+- PartProc (func_00218B10, 3060 bytes of asm) ported word for word (native_partproc.c, agent draft,
+  integrated): UYA_NPARTPROC 0/1/2. Check mode, walking: 958-971 runs per level identical on levels 1, 3,
+  8, 14 (the agent: 18,190 runs on all 19 levels); paths: screen quads, world quads, streaks, two-point
+  culls, specials, paging appends, full/last/empty blocks. Not run anywhere: the line records (byte+1 & 3
+  == 2). Native vs the game's routine: 0 px, all 19 levels walking.
+- Direct (UYA_NPARTDIRECT 0/2): PartProc's whole part of the chain (MPG REF; CNT 6 + UNPACK 6 at VU 0; REF
+  14: UNPACK 10 at VU 6, MSCALF 0, BASE 0, OFFSET 0x200, DIRECT 3; the record blocks: UNPACK at TOPS +
+  MSCALF 0xA0; CNT 0 FLUSHA) is checked against the templates once built; its first qword becomes a NEXT
+  past the part (NATIVE_PART_MARK). At the marker the qword is put back, the shape checked again, and the
+  same operations done (uya_vif1_op_*, vu_mpg, native_gif) reading the part's own words; any other shape
+  goes back to the chain. The program runs as from the VIF.
+- Checks: UYA_STARTTRACE=a,b (vif.c) logs every VU1 program start with TOPS, TOP, DBF and a hash of VU1
+  data memory: direct vs chain identical for every start in vsyncs 1500-1520 (level 3: 1073 starts,
+  level 8: 795); level 3: 800 parts drawn directly, 0 back to the chain. Pixels: software all 19 levels
+  0 px against UYA_NPARTDIRECT=0; GL on the GPU, levels 3, 8, 14, 0 px against UYA_NPARTPROC=0.
+- Census, level 3 on the GPU, per send: program starts from the chain 14.7 -> 5.3, MPG 22 -> 11.8
+  (10.0k -> 4.9k words), V4-32 unpacks 21.6 -> 11.2 (3.3k -> 134 words). What is left is the strip effect
+  (57843: its starts, its masked V2/V4-8/V3 unpacks, its MPGs); its writers are being ported (agent).
+- MPG census by source (level 3, GPU, after the particles): strips 57843 (0x10E810 packet) 1.4/send x 3
+  MPGs; mobys 13859 (0x10FAA0, DrawMobys' VU1_addDataRef, outside MobyProc) 0.9 x 6; shrub clip 912339
+  (0x1022E0, ShrubProc's clip part start) 0.4 x 3.
+- ShrubProc's clip start: its MPG now in the record too (R_CSTART carries the packet; uya_vif1_op_mpg_packet
+  in vif.c applies a microprogram packet: NOP/FLUSH*/MPG codes only). Records vs chain (UYA_SSTARTREC=0):
+  0 px and identical start traces (levels 3: 1686 starts, 8: 1185).
+
+## Piece 7, step 3: the strip service native (18-19 October)
+
+- native_strip.c (agent draft, integrated): the strip setup func_001F7868, one strip func_L00_001FDE48,
+  the strip list func_001F8B6C, word for word (UYA_NSTRIP 0/1/2). recomp.py: HOST_HOOKS_ALLREFS, an
+  opt-in wider data-reference extraction for these hooks (every gp access incl. lwc1/swc1 and addiu from
+  gp; lui with the first addiu/load/store based on it); the other hooks unchanged.
+- Check mode identical everywhere (agent: setup 31,750 runs, strip 64,981, list 3,340 over 19 levels;
+  here: levels 1, 9, 11, 17 identical). Native vs the game's: 0 px, all 19 levels walking.
+- Census (agent, per walk): besides these three, seven level-specific builders write strips:
+  L01_0021F9C8, L01_002BA150, L02_00250A58, L02_002A52D0, L06_00216B38, L09_002C2B08, L12_002BD3D0. They
+  make most strips on some levels (level 9: about 59 starts a send; level 6: 20; level 2: 9; level 1: 7).
+- A strip block in the chain (level 9): CNT with STCYCL 4/4 + UNPACK V4-32 1 at TOPS (the strip's GIF tag),
+  then UNPACK 1 at VU 940, STCOL, STCYCL 3/1, STMOD 0, STMASK + UNPACK V2-32 (masked) at TOPS+1, UNPACK
+  V4-8 at TOPS+2, STMASK + UNPACK V3-32 (masked) at TOPS+3, MSCALF 0x60 (0x70 clipped), FLUSH. Blocks can
+  span tags: some REF vertex data written earlier in the chain. So recognising strip blocks in the walker
+  would mean decoding that command stream (the VIF again, for one command set); removing the VIF for
+  strips needs every producer hooked (the three above and the seven level builders), with the records
+  holding the vertex data before it is VIF-encoded.
+
+## Piece 7, step 4: the builders' strips direct, the last producers, the VIF1 stub (19 October)
+
+- native_stripb.c (agent port of the seven level builders, word for word, UYA_NSTRIPB 0/1/2; check mode
+  identical). In mode 2 each run is wrapped by native_stripd_begin/end and the builders' record point tells
+  native_stripd of each strip (native_stripd_sem: its chain range, the GIF tag and VU 940 qword, where its
+  ST/colour/position arrays are, in the range or REF'd, grid cells positions first, its start). The strips
+  of the three service writers go through native_stripd_convert (the template's shape). Level 9: 0 ranges
+  kept in the chain.
+- vif.c, the stub (UYA_VIFSTUB 0/1/2): VIF1's own commands are NOP, FLUSH*, MARK, MPG and DIRECT; any other
+  goes to the "full VIF", counted (uya_vif1_full_n) and logged once per command with the chain tag. 2
+  drops them (testing). UYA_STUBTRACE=from,n: the last 16 chain tags and the 12 qwords after the tag, for
+  the first n full-VIF commands from vsync `from`.
+- What still needed the full VIF in gameplay (GPU census, vsyncs 1100-1600), and the fixes:
+  - every level, 2 unpacks a frame: DrawTfrag's two transform packets (CNT 4; STCYCL 4/4; UNPACK V4-32 4
+    at VU 5 and at 0x14D) in front of TfragProc's part. When TfragProc draws everything directly they
+    become a record (native_tfragproc.c, UYA_NTFXFORM 0/1): the first packet's qword a NEXT past both
+    (NATIVE_TXFORM_MARK); at the marker the qword is put back, the shape checked, the two unpacks done
+    from the chain's own words.
+  - level 13: a second particle routine, func_0022CEB8 (one list, up to 30 particles a block, VU0
+    microprograms 0xC80/0xC90), writing PartProc's chain format (the same MPG and templates). Hooked at
+    entry and return (UYA_NPARTLIST 0/1): the game's routine runs and its part goes through PartProc's
+    part_direct (shape checked, NEXT marker, native_part_tag).
+  - level 1: func_L01_00263338, a level writer of two 46-vertex strips (the second the first's CTXT copy:
+    its own ST pairs, then a REF back to the first strip's colours, positions and MSCAL). Hooked
+    (uya_stripl1, HOST_HOOKS_ALLREFS); its two strips go to native_stripd as semantic strips.
+- The boot screens (vsync ~177) still use the full VIF (the executable's tie, terrain and part chains before
+  a level program is loaded); the stub keeps running them.
+- Results: software, all 19 levels, default vs UYA_NTFXFORM=0 UYA_NPARTLIST=0 UYA_NSTRIPDIRECT=0: 0 px
+  (level 18 differed in the parallel run, 0 px rerun alone). GL on the GPU, levels 1, 3, 9, 13, the same
+  A/B: 0 px. UYA_VIFSTUB=2 (the full VIF's commands dropped) vs 1 on the GPU, levels 1, 2, 3, 6, 9, 12,
+  13: 0 px. GPU census, all 19 levels, vsyncs 1100-1600: VIF1 gets only NOP, FLUSH, FLUSHA, MPG (3
+  sources, ~6 a send) and DIRECT; no UNPACK, MSCAL, STCYCL, STMOD, STMASK, STROW/STCOL, BASE or OFFSET.
+- Still on the full VIF: the boot screens (11 command kinds logged once at vsync ~177), and the software
+  renderer's paths (it draws terrain and mobys from VU memory, so their chains still go through the VIF).

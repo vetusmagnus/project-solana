@@ -357,6 +357,7 @@ int native_shrub_clip_group(const u8 *mem, u32 grp, const float c22[4], const fl
  * from the level data at each draw (the game patches them). The image persists from frame to
  * frame, as VU memory does. */
 #define EE(a) ((const u8 *)(uintptr_t)(a))
+int uya_vif1_op_mpg_packet(const u32 *w, u32 qwc);
 static u32 rd32(u32 a) { u32 v; memcpy(&v, EE(a), 4); return v; }
 typedef struct { u32 p, qwc; u8 *img; u32 *src; int ok; u32 data, nq; u8 *raw, *vol; } DPk;   /* img: qwords 0..qwc (from TOPS); raw: the packet's
                                                     stream as read, vol: its qwords the game patches (the texture qwords) */
@@ -492,7 +493,7 @@ static void rec4(u32 k, u32 a, u32 b, u32 c) { u32 *r = drec[drec_next++ % DREC]
 void native_shrub_seg_start(void) { rec4(R_START, 0, 0, 0); }
 void native_shrub_seg_packet(int slot, u32 top, u32 pc, int clip) { rec4(clip ? R_CPACKET : R_PACKET, (u32)slot, top, pc); }
 void native_shrub_seg_group(u32 at, u32 n, int clip) { rec4(clip ? R_CGROUP : R_GROUP, at, n, 0); }
-void native_shrub_seg_cstart(u32 consts) { rec4(R_CSTART, consts, 0, 0); }
+void native_shrub_seg_cstart(u32 consts, u32 mpg_addr, u32 mpg_qwc) { rec4(R_CSTART, consts, mpg_addr, mpg_qwc); }
 /* GS packets ShrubProc built itself (its billboards): kept here, each sent as VIF1 DIRECT sent it */
 #define GRING (1u << 18)
 static u32 (*gring)[4]; static u32 gring_next;
@@ -573,7 +574,8 @@ static void seg_draw(u32 id)
             native_gif(1, t[0], r[2]);
             break;
         }
-        case R_CSTART:                                  /* the clip program's constants (VU 0..5), its start */
+        case R_CSTART:                                  /* (the clip program's MPG, when the record has it), its constants (VU 0..5), its start */
+            if (r[2] && !uya_vif1_op_mpg_packet((const u32 *)EE(r[2]), r[3])) { static int told; if (!told++) uya_log("native shrub direct: the clip program's MPG packet at %08X has other codes", r[2]); }
             for (u32 q = 0; q < 6; q++) memcpy(pimg + q * 16, EE(r[1] + 16 * q), 16);
             uya_shrubclip_run(pimg, 0x0000);
             break;

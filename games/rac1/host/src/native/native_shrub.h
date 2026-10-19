@@ -17,6 +17,10 @@ int native_shrub_clip_group(const u8 *vumem, u32 grp, const float c22[4], const 
  * chain's order (clip: the clip part's, for the shrub clip program). native_shrub_tag: the chain walker's tag (1: a marker, its segment drawn).
  * dec_push (testing, UYA_SHRUBDEC=1): the packet the chain is about to give the program. */
 #define NATIVE_SHRUB_MARK 0x00005253u
+/* ShrubProc's chain start as a record (native_shrubproc.c): a marker CNT (qwc 0), VIF words NOP 'SS' and
+ * the record's index; 1 if drawn */
+#define NATIVE_SSTART_MARK 0x00005353u
+int native_shrub_start_tag(const u32 *q);
 #define NATIVE_SHRUB_DECMARK 0x00004453u   /* (testing: the next packet's slot, for dec_push) */
 void native_shrub_direct_frame(u32 sig, const u32 consts[12]);
 int native_shrub_direct_class(u32 p);
@@ -24,7 +28,8 @@ u32 native_shrub_seg_begin(void);
 void native_shrub_seg_start(void);
 void native_shrub_seg_packet(int slot, u32 top, u32 pc, int clip);
 void native_shrub_seg_group(u32 at, u32 n, int clip);
-void native_shrub_seg_cstart(u32 consts);
+/* the clip part's start: its constants (and its MPG packet: address, qwc; 0: the MPG is in the chain) */
+void native_shrub_seg_cstart(u32 consts, u32 mpg_addr, u32 mpg_qwc);
 void native_shrub_seg_gif(const u32 (*q)[4], u32 n);   /* GS packets built by ShrubProc (billboards): sent as PATH2 */   /* the clip part's constants (6 qwords), the clip program's start */
 void native_shrub_seg_inst(u32 at, u32 blk, u32 col, int fading);
 int native_shrub_tag(const u32 *tag);

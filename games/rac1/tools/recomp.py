@@ -53,10 +53,27 @@ LEVEL = DUMP = EXEGEN = None
 HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragproc.c)
               "func_00236F00": "uya_tieproc",       # TieProc (native_tieproc.c)
               "func_00229F00": "uya_shrubproc",     # ShrubProc (native_shrubproc.c)
+              "func_00218B10": "uya_partproc",      # PartProc, the particles (native_partproc.c)
+              "func_0022CEB8": "uya_partlist",      # a single particle list in PartProc's chain format (native_partproc.c)
               "func_L00_002569F8": "uya_mobyproc",  # MobyProc (native_mobyproc.c; level code)
               "func_00212658": "uya_mobyproc",      # MobyProc, the executable's copy (before a level program is loaded: the boot screens)
               "func_L00_001EEBD8": "uya_mobyskin",  # the moby skin driver and its VU0 program (native_mobyskin.c)
-              "func_001EE9F8": "uya_mobyskin"}      # the skin driver, the executable's copy (the boot screens)
+              "func_001EE9F8": "uya_mobyskin",      # the skin driver, the executable's copy (the boot screens)
+              "func_001F7868": "uya_stripsetup",    # the strip service's setup, VU1 image 57843 (native_strip.c)
+              "func_L00_001FDE48": "uya_strip",     # one strip (native_strip.c; shared level code)
+              "func_001F8B6C": "uya_striplist",     # the strip list (native_strip.c)
+              "func_L01_0021F9C8": "uya_stripb_f9c8",   # a strip and its CTXT 1 copy (native_stripb.c; shared level code)
+              "func_L01_002BA150": "uya_stripb_ba150",  # the strip setup with its own GS block (native_stripb.c)
+              "func_L02_00250A58": "uya_stripb_50a58",  # the grid strips (native_stripb.c)
+              "func_L02_002A52D0": "uya_stripb_a52d0",  # the setup and a DIRECT texture upload (native_stripb.c)
+              "func_L06_00216B38": "uya_stripb_16b38",  # the ribbon (native_stripb.c; level 6)
+              "func_L09_002C2B08": "uya_stripb_c2b08",  # the setup and a strip per entry (native_stripb.c; level 9)
+              "func_L12_002BD3D0": "uya_stripb_bd3d0",  # the entry list of double strips (native_stripb.c)
+              "func_L01_00263338": "uya_stripl1"}       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+# hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
+# every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
+HOST_HOOKS_ALLREFS = {"uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
+                      "uya_stripb_a52d0", "uya_stripb_16b38", "uya_stripb_c2b08", "uya_stripb_bd3d0"}
 _a = sys.argv[3:]
 while _a:
     _o = _a.pop(0)
@@ -767,11 +784,19 @@ def translate(name, rng=None, entries=None):
         # data references, read from the routine's own bytes (gp offsets and lui/addiu pairs,
         # in order), and returns 1 when it did the routine
         gofs, absv = [], []
+        allrefs = hook in HOST_HOOKS_ALLREFS
+        _ls = (0x23, 0x2B, 0x1E, 0x1F, 0x36, 0x3E, 0x37, 0x3F, 0x21, 0x25, 0x24, 0x20, 0x28, 0x29)
         for k, (pc, w) in enumerate(ins):
             op = w >> 26
-            if op != 15 and ((w >> 21) & 31) == 28 and op in (0x23, 0x2B, 0x1E, 0x1F, 0x36, 0x3E, 0x37, 0x3F, 0x21, 0x25, 0x24, 0x20, 0x28, 0x29):
+            if op != 15 and ((w >> 21) & 31) == 28 and (op in _ls or (allrefs and op in (0x31, 0x39, 0x09))):
                 gofs.append(w & 0xFFFF if (w & 0xFFFF) < 0x8000 else (w & 0xFFFF) - 0x10000)
-            if op == 15:                       # lui rt: its addiu rt, rt, lo
+            if op == 15 and allrefs:           # lui rt: the first addiu / load / store based on rt
+                rt = (w >> 16) & 31
+                for pc2, w2 in ins[k + 1:k + 5]:
+                    if ((w2 >> 26) in _ls + (0x31, 0x39, 0x09)) and ((w2 >> 21) & 31) == rt:
+                        lo = w2 & 0xFFFF; lo = lo - 0x10000 if lo >= 0x8000 else lo
+                        absv.append(((w & 0xFFFF) << 16) + lo & 0xFFFFFFFF); break
+            elif op == 15:                     # lui rt: its addiu rt, rt, lo
                 rt = (w >> 16) & 31
                 for pc2, w2 in ins[k + 1:k + 4]:
                     if (w2 >> 26) == 9 and ((w2 >> 16) & 31) == rt and ((w2 >> 21) & 31) == rt:

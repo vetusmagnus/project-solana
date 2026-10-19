@@ -24,6 +24,10 @@ int native_tie_clip_mesh(const u8 *vumem, u32 inst);
  * The chain walker (host/src/sdk/dma.c) gives native_tie_tag each tag: 1 if it was a marker
  * (its segment drawn). */
 #define NATIVE_TIE_MARK 0x00004954u
+/* TieProc's chain start as a record (native_tieproc.c): a marker CNT (qwc 0) whose VIF words are NOP 'TS'
+ * and the record's index; 1 if drawn */
+#define NATIVE_TSTART_MARK 0x00005354u
+int native_tie_start_tag(const u32 *q);
 void native_tie_direct_frame(u32 sig, const u32 k966[36], const u32 row[4]);
 int native_tie_direct_class(u32 p, u32 base);
 u32 native_tie_seg_begin(void);

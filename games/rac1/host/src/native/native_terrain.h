@@ -27,4 +27,11 @@ u32 native_terrain_consts(const NativeTerrainConsts *k);
 /* reset: the tfrag program's setup (the template's MSCAL 0) happens before the segment */
 u32 native_terrain_seg_begin(u32 kid, int reset);
 void native_terrain_seg_add(u32 idx, u32 mode);
+/* DrawTfrag's two transform packets (CNT 4; STCYCL 4/4; UNPACK V4-32 4 at VU 5, then at 0x14D) as a
+ * record when TfragProc draws directly (native_tfragproc.c): the first packet's qword becomes a NEXT
+ * past both (VIF words NOP NATIVE_TXFORM_MARK and the record's index). native_tfrag_xform_tag: 1 the
+ * two unpacks done from the chain's own words (go to the NEXT's address), 2 the qword put back (read
+ * it again: the packets go through the VIF), 0 not known */
+#define NATIVE_TXFORM_MARK 0x00005846u
+int native_tfrag_xform_tag(const u32 *q, u32 t);
 #endif

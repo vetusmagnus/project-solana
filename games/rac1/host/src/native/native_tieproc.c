@@ -66,6 +66,7 @@
 #include "rc.h"
 #include "uya_host.h"
 #include "native_tie.h"
+#include "native_moby.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -164,6 +165,131 @@ static void emit_start(u32 qwc_at, u32 data, u32 consts, int n, u32 *sp, u32 *fp
     for (int k = 0; k < n; k++) sq_(*sp + 16 * (u32)k, &v[k]);
     *sp += 16 * (u32)n; *fp += 16 * (u32)n;
 }
+/* ---- the chain start as a record (direct mode; UYA_TSTARTREC: 0 the chain, 1 check, 2 records) ----
+ * The start's 6 chain qwords (from the level's constants) are, in the game's template: REF 9 (VIF
+ * STMOD 0, UNPACK V4-32 9 at VU 966), CNT 0 (MSCAL 0x40), CNT 2 (STROW + the row; BASE 0, OFFSET 0x2C,
+ * STMOD 0, STCYCL 4/4), CNT 0 (FLUSHA), after a REF to the program's MPG packet. With that template,
+ * one marker takes their place, and at the marker the record does the same, in the same order: the
+ * MPG (the packet's MPGs), STMOD, the unpack (the REF's data, read when the chain is walked, as the
+ * REF would), the start (TOP, the double buffer; the program at 0x40 only loads registers the direct
+ * ties do not use), STROW, BASE, OFFSET, STMOD, STCYCL. Check mode applies the record, then the
+ * original qwords through the VIF from the same state, and compares VIF1's state and VU1 data memory. */
+void vu_mpg(int vu, u32 addr, const u32 *w, u32 ninstr);
+#define TS_N 64
+static struct { u32 q[36]; u32 mpg_addr, mpg_qwc, clip; } ts_rec[TS_N];
+static u32 ts_next;
+static int ts_mode = -1;
+static unsigned long long ts_n, ts_bad, ts_mpgbad;
+static int start_template_ok(u32 c)
+{
+    return M32(c) == 0x30000009u && M32(c + 8) == 0x05000000u && M32(c + 12) == 0x6C0903C6u &&
+           M32(c + 0x10) == 0x10000000u && M32(c + 0x18) == 0x15000008u && M32(c + 0x1C) == 0 &&
+           M32(c + 0x20) == 0x10000002u && M32(c + 0x28) == 0 && M32(c + 0x2C) == 0x30000000u &&
+           M32(c + 0x40) == 0x03000000u && M32(c + 0x44) == 0x0200002Cu && M32(c + 0x48) == 0x05000000u && M32(c + 0x4C) == 0x01000404u &&
+           M32(c + 0x50) == 0x10000000u && M32(c + 0x58) == 0x13000000u && M32(c + 0x5C) == 0;
+}
+static void emit_start_rec(u32 qwc_at, u32 data, u32 consts, u32 *sp, u32 *fp)
+{
+    u32 i = ts_next++ % TS_N;
+    for (int k = 0; k < 24; k++) ts_rec[i].q[k] = M32(consts + 4 * (u32)k);
+    ts_rec[i].mpg_addr = data; ts_rec[i].mpg_qwc = M16(qwc_at); ts_rec[i].clip = 0;
+    sq_(*sp, &ZQ);
+    rc_sw(*sp, 0x10000000u); rc_sw(*sp + 8, NATIVE_TSTART_MARK); rc_sw(*sp + 12, i);
+    *sp += 0x10; *fp += 0x10;
+}
+/* the MPG packet's uploads (FLUSH, FLUSHE, FLUSHA, NOP codes and MPGs only; 0 if it has anything else) */
+static int apply_mpg(u32 addr, u32 qwc)
+{
+    const u32 *w = (const u32 *)RC_A(addr);
+    u32 n = qwc * 4, i = 0;
+    while (i < n) {
+        u32 code = w[i], cmd = (code >> 24) & 0x7F;
+        if (cmd == 0x00 || cmd == 0x10 || cmd == 0x11 || cmd == 0x13) { i++; continue; }
+        if (cmd != 0x4A) return 0;
+        u32 num = (code >> 16) & 0xFF; if (!num) num = 256;
+        if (i + 1 + num * 2 > n) return 0;
+        vu_mpg(1, (code & 0xFFFF) * 8, w + i + 1, num);
+        i += 1 + num * 2;
+    }
+    return 1;
+}
+/* the clip part's start (9 qwords: CNT 2 with VIF DIRECT 2 and its A+D qwords; REF 10 (STMOD 0, UNPACK
+ * V4-32 10 at VU 966); CNT 0 (MSCAL 0x40); CNT 2 (STROW + row; BASE 0, OFFSET 0x2C, STMOD 0, STCYCL 4/4);
+ * CNT 0 (FLUSHA)), as a record when the clip part goes direct (the GPU renderer): the program's 0x40
+ * (224979) still runs, at the marker: it leaves registers and VU memory other programs read */
+static int cstart_template_ok(u32 c)
+{
+    return M32(c) == 0x10000002u && M32(c + 8) == 0 && M32(c + 12) == 0x50000002u &&
+           M32(c + 0x30) == 0x3000000Au && M32(c + 0x38) == 0x05000000u && M32(c + 0x3C) == 0x6C0A03C6u &&
+           M32(c + 0x40) == 0x10000000u && M32(c + 0x48) == 0x15000008u && M32(c + 0x4C) == 0 &&
+           M32(c + 0x50) == 0x10000002u && M32(c + 0x58) == 0 && M32(c + 0x5C) == 0x30000000u &&
+           M32(c + 0x70) == 0x03000000u && M32(c + 0x74) == 0x0200002Cu && M32(c + 0x78) == 0x05000000u && M32(c + 0x7C) == 0x01000404u &&
+           M32(c + 0x80) == 0x10000000u && M32(c + 0x88) == 0x13000000u && M32(c + 0x8C) == 0;
+}
+static void emit_cstart_rec(u32 qwc_at, u32 data, u32 consts, u32 *sp, u32 *fp)
+{
+    u32 i = ts_next++ % TS_N;
+    for (int k = 0; k < 36; k++) ts_rec[i].q[k] = M32(consts + 4 * (u32)k);
+    ts_rec[i].mpg_addr = data; ts_rec[i].mpg_qwc = M16(qwc_at); ts_rec[i].clip = 1;
+    sq_(*sp, &ZQ);
+    rc_sw(*sp, 0x10000000u); rc_sw(*sp + 8, NATIVE_TSTART_MARK); rc_sw(*sp + 12, i);
+    *sp += 0x10; *fp += 0x10;
+}
+void native_gif(int path, const u32 *d, u32 qwc);
+static void apply_cstart(u32 i)
+{
+    const u32 *c = ts_rec[i].q;
+    if (!apply_mpg(ts_rec[i].mpg_addr, ts_rec[i].mpg_qwc)) { if (ts_mpgbad++ < 3) uya_log("native TieProc: the clip start's MPG packet at %08X has other codes", ts_rec[i].mpg_addr); }
+    { extern const char *uya_gs_src; uya_gs_src = "PATH2 (VIF1 DIRECT)"; native_gif(1, c + 4, 2); }   /* DIRECT 2 */
+    uya_vif1_op_reg(c[14]);                                          /* STMOD 0 */
+    uya_vif1_op_unpack(c[15], (const u32 *)RC_A(c[13]), 10 * 4);     /* VU 966..975 from the REF's data */
+    uya_vif1_op_mscal((c[18] & 0xFFFF) * 8);                         /* MSCAL 0x40: the clip program's setup */
+    uya_vif1_op_strow(c + 24);                                       /* STROW */
+    uya_vif1_op_reg(c[28]); uya_vif1_op_reg(c[29]); uya_vif1_op_reg(c[30]); uya_vif1_op_reg(c[31]);   /* BASE, OFFSET, STMOD, STCYCL */
+}
+static void apply_start(u32 i)
+{
+    if (ts_rec[i].clip) { apply_cstart(i); return; }
+    const u32 *c = ts_rec[i].q;
+    if (!apply_mpg(ts_rec[i].mpg_addr, ts_rec[i].mpg_qwc)) { if (ts_mpgbad++ < 3) uya_log("native TieProc: the start's MPG packet at %08X has other codes", ts_rec[i].mpg_addr); }
+    uya_vif1_op_reg(c[2]);                                           /* STMOD 0 */
+    uya_vif1_op_unpack(c[3], (const u32 *)RC_A(c[1]), 9 * 4);        /* VU 966..974 from the REF's data */
+    uya_vif1_op_mscal((c[6] & 0xFFFF) * 8);                          /* MSCAL 0x40 */
+    uya_vif1_op_strow(c + 12);                                       /* STROW */
+    uya_vif1_op_reg(c[16]); uya_vif1_op_reg(c[17]); uya_vif1_op_reg(c[18]); uya_vif1_op_reg(c[19]);   /* BASE, OFFSET, STMOD, STCYCL */
+}
+void uya_dma_vif1_replay(const u32 *q, int tte);
+int native_tie_start_tag(const u32 *q)
+{
+    u32 i = q[3] % TS_N;
+    if (ts_mode != 1) { apply_start(i); ts_n++; return 1; }
+    /* check: the record, then the chain's qwords from the same state; the chain's result stays */
+    static u8 m0[0x4000], ma[0x4000]; u8 *vu = (u8 *)(uintptr_t)0x1100C000u;
+    UyaVifState s0, sa, sb;
+    uya_vif1_get_state(&s0); memcpy(m0, vu, sizeof m0);
+    apply_start(i);
+    uya_vif1_get_state(&sa); memcpy(ma, vu, sizeof ma);
+    uya_vif1_set_state(&s0); memcpy(vu, m0, sizeof m0);
+    const u32 *c = ts_rec[i].q;
+    u32 mq[4] = { 0x30000000u | ts_rec[i].mpg_qwc, ts_rec[i].mpg_addr, 0, 0 };
+    uya_dma_vif1_replay(mq, 1);
+    if (ts_rec[i].clip) { uya_dma_vif1_replay(c, 1); uya_dma_vif1_replay(c + 12, 1); uya_dma_vif1_replay(c + 16, 1); uya_dma_vif1_replay(c + 20, 1); uya_dma_vif1_replay(c + 32, 1); }
+    else { uya_dma_vif1_replay(c, 1); uya_dma_vif1_replay(c + 4, 1); uya_dma_vif1_replay(c + 8, 1); uya_dma_vif1_replay(c + 20, 1); }
+    uya_vif1_get_state(&sb);
+    ts_n++;
+    sa.need = sb.need;
+    int dv = memcmp(&sa, &sb, sizeof sa) != 0, dm = memcmp(ma, vu, sizeof ma) != 0;
+    if (dv || dm) {
+        if (ts_bad++ < 10) {
+            u32 q0 = 0; while (q0 < 0x400 && !memcmp(ma + q0 * 16, vu + q0 * 16, 16)) q0++;
+            uya_log("native TieProc start check: run %llu differs: VIF state %s (TOPS %03X/%03X TOP %03X/%03X DBF %u/%u), VU memory %s (first qword %03X)",
+                    ts_n, dv ? "differs" : "same", sa.tops, sb.tops, sa.top, sb.top, sa.dbf, sb.dbf, dm ? "differs" : "same", q0);
+        }
+    }
+    if (ts_n % 1000 == 0) uya_log("native TieProc start check: %llu starts, %llu differ", ts_n, ts_bad);
+    return 1;
+}
+
 /* a CNT with a VIF FLUSHA, closing a part */
 static void emit_close(u32 *sp, u32 *fp)
 {
@@ -345,7 +471,9 @@ static void run(RcCtx *c, const TieRefs *R)
             if (R->consts2) for (int k = 0; k < 9; k++) uya_log("   clip consts %d: %08X %08X %08X %08X", k, M32(R->consts2 + 16 * k), M32(R->consts2 + 16 * k + 4), M32(R->consts2 + 16 * k + 8), M32(R->consts2 + 16 * k + 12));
         }
     }
-    emit_start(R->mpg_qwc, R->mpg_addr, R->consts, 6, &sp, &fp);
+    if (ts_mode < 0) { const char *e = getenv("UYA_TSTARTREC"); ts_mode = e ? atoi(e) : 2; }
+    if (dok && ts_mode > 0 && start_template_ok(R->consts)) emit_start_rec(R->mpg_qwc, R->mpg_addr, R->consts, &sp, &fp);
+    else emit_start(R->mpg_qwc, R->mpg_addr, R->consts, 6, &sp, &fp);
     /* the upper halves of v0, v1, a0 (the last 128-bit loads into them: the constants' copy) */
     u64 v0h = M64(R->consts + 8), v1h = M64(R->consts + 0x18), a0h = M64(R->consts + 0x28);
 
@@ -688,6 +816,11 @@ static void run(RcCtx *c, const TieRefs *R)
                 if (why) { static int told; if (told++ < 3) uya_log("native TieProc: the clip part goes into the chain (%s)", why); }
             } else if (dok) { static int told; if (!told++) uya_log("native TieProc: the clip part's templates are not as expected: it goes into the chain"); }
             if (dok) { if (cdir) st_cdirect++; else st_cchain++; }
+            if (cdir && ts_mode > 0 && cstart_template_ok(R->consts2)) {
+                /* the clip start's 10 qwords (still in the scratchpad: nothing was flushed since) become a record */
+                sp -= 0xA0; fp -= 0xA0;
+                emit_cstart_rec(R->mpg2_qwc, R->mpg2_addr, R->consts2, &sp, &fp);
+            }
             if (cdir) { mark(&sp, &fp); if ((sp & 0xE00) == 0xE00) flush(&sp, fp); }
         }
         /* the draws, per run of entries with the same packet table */

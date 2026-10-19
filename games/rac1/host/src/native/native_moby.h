@@ -79,5 +79,14 @@ int uya_vu1_image_is(u32 pc, const char *name);
 typedef struct { u32 cl, wl, mode, mask, row[4], col[4], base, ofst, tops, top, itops, itop, dbf, mark, need; } UyaVifState;
 void uya_vif1_get_state(UyaVifState *s);
 void uya_vif1_set_state(const UyaVifState *s);
+/* VIF1 operations for records (gfx/vif.c): a register set by its code word (STCYCL, OFFSET, BASE, ITOP,
+ * STMOD), STROW, an UNPACK of data by its code word, a program's start (MSCAL) */
+void uya_vif1_op_reg(u32 code);
+void uya_vif1_op_strow(const u32 row[4]);
+void uya_vif1_op_stcol(const u32 col[4]);
+void uya_vif1_op_stmask(u32 mask);
+void uya_vif1_op_unpack(u32 code, const u32 *d, u32 nwords);
+void uya_vif1_op_mscal(u32 pc);
+int uya_vif1_op_mpg_packet(const u32 *w, u32 qwc);   /* a microprogram packet (FLUSH*, NOP, MPG codes); 0 if other codes */
 extern unsigned long long uya_vif1_direct_n;
 #endif

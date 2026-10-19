@@ -90,6 +90,8 @@ static void uya_dma_sink(s32 ch, const void *data, u32 qwc)
 #include "../native/native_tie.h"
 #include "../native/native_shrub.h"
 #include "../native/native_moby.h"
+#include "../native/native_part.h"
+#include "../native/native_stripd.h"
 void uya_dma_vif1_replay(const u32 *q, int tte)
 {
     u32 qwc = q[0] & 0xFFFF, id = (q[0] >> 28) & 7, addr = q[1] & 0x7FFFFFFF;
@@ -137,6 +139,20 @@ s32 uyafn_12D938(void *chan, void *tag)
             /* mobys from the native MobyProc: a marker (a NEXT past the run) names a run of them
              * (host/src/native/native_mobyseg.c): drawn (1), or its first qword put back and read
              * again (2: the run goes through the chain); else the NEXT skips the run */
+            /* particles from the native PartProc: a NEXT past its part (host/src/native/native_partproc.c) */
+            /* DrawTfrag's transform packets as a record (host/src/native/native_tfragproc.c) */
+            if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_TXFORM_MARK) {
+                native_terrain_flush();
+                int r = native_tfrag_xform_tag(q, t);
+                if (r == 1) { t = addr; continue; }
+                if (r == 2) continue;
+            }
+            if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_PART_MARK) {
+                native_terrain_flush();
+                int r = native_part_tag(q, t);
+                if (r == 1) { t = addr; continue; }
+                if (r == 2) continue;
+            }
             if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_MOBY_MARK) {
                 native_terrain_flush();
                 int r = native_moby_tag(q, t, tte != 0);
@@ -146,7 +162,10 @@ s32 uyafn_12D938(void *chan, void *tag)
             /* (testing, UYA_NMOBYDIRECT=1: a run's first CNT with a check marker; the tag goes on as it is) */
             if (!irq && id == 1 && (q[1] >> 16) == NATIVE_MOBY_CHKMARK) native_mobyseg_chk_begin(q[1] & 0xFFFF, t);
             /* ties from the native TieProc: a marker names a run of them (host/src/native/native_tie.c) */
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_STRIP_MARK) { native_terrain_flush(); if (native_strip_tag(q)) { t += 16; continue; } }
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_TSTART_MARK) { native_terrain_flush(); if (native_tie_start_tag(q)) { t += 16; continue; } }
             if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_TIE_MARK) { native_terrain_flush(); if (native_tie_tag(q)) { t += 16; continue; } }
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_SSTART_MARK) { native_terrain_flush(); if (native_shrub_start_tag(q)) { t += 16; continue; } }
             if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_SHRUB_MARK) { native_terrain_flush(); if (native_shrub_tag(q)) { t += 16; continue; } }
             if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_SHRUB_DECMARK) { native_terrain_flush(); native_shrub_dec_push((int)q[3]); t += 16; continue; }
             if (!irq && (id == 1 || id == 3)) {

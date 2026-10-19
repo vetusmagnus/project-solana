@@ -235,6 +235,8 @@ void native_stripd_end(u32 s0, u32 chain_word, u32 ch0, u32 end)
 }
 void native_stripd_convert(u32 chain_word, u32 ch0, u32 end) { native_stripd_end(sem_n, chain_word, ch0, end); }
 
+static int upl_host(void) { static int on = -1; if (on < 0) { const char *e = getenv("UYA_NUPL"); on = e ? atoi(e) != 0 : 1; } return on; }
+void uya_gs_dlist(const u32 *d, u32 qwc);
 static void apply_run(u32 id, int depth);
 static void apply_item(u32 i, int depth)
 {
@@ -245,7 +247,23 @@ static void apply_item(u32 i, int depth)
         if (!uya_vif1_op_mpg_packet((const u32 *)RC_A(item[i].a), item[i].b)) { static int told; if (!told++) uya_log("native strip direct: the MPG packet at %08X has other codes", item[i].a); }
         break;
     case I_GIF: uya_gs_src = "PATH2 (VIF1 DIRECT)"; native_gif(1, p, item[i].b); break;
-    case I_GIFREF: uya_gs_src = "PATH2 (VIF1 DIRECT)"; native_gif(1, (const u32 *)RC_A(item[i].a), item[i].b); break;
+    case I_GIFREF: {
+        const u32 *d = (const u32 *)RC_A(item[i].a);
+        u64 lo = ((u64)d[1] << 32) | d[0], hi = ((u64)d[3] << 32) | d[2];
+        u32 nl = (u32)(lo & 0x7FFF);
+        if (upl_host() && (lo & ~0x7FFFull & ~0x8000ull) == (2ull << 58) && !hi && nl && nl + 1 == item[i].b) {
+            /* an IMAGE packet (the animated texture's texels): its data as a host upload (op 21; the tag's Q
+             * reset, op 3), the transfer's registers having come with the packet before (UYA_NUPL=0: as GIF) */
+            static u32 *x; static u32 xc;
+            if (nl + 2 > xc) { free(x); xc = nl + 64; x = malloc((size_t)xc * 16); if (!x) { xc = 0; native_gif(1, d, item[i].b); break; } }
+            memset(x, 0, 32); x[0] = 3; x[4] = 21; x[5] = nl;
+            memcpy(x + 8, d + 4, (size_t)nl * 16);
+            uya_gs_src = "native texture upload";
+            uya_gs_dlist(x, nl + 2);
+            break;
+        }
+        uya_gs_src = "PATH2 (VIF1 DIRECT)"; native_gif(1, d, item[i].b);
+    } break;
     case I_RUN: apply_run(item[i].a, depth + 1); break;
     case I_SETUP:                                       /* p: the setup's CNT and its data (0xF0 bytes) */
         uya_vif1_op_reg(p[3]);                          /* STCYCL 4/4 (FLUSH: nothing to wait for) */

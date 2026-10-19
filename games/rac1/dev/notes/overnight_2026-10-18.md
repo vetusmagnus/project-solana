@@ -497,3 +497,34 @@ from EE code). Research on each producer: piece7_research.md.
   vsync 0 to 1000 (boot screens, the level load, the start of gameplay; dev/scripts/gl_replay_boot_ab.sh):
   999 frames each, 0 px; levels 1, 3, 9, 13 walking (vsyncs 1560-1639): 0 px. The GPU A/B of the game side
   (UYA_N2D=0 vs default) on the final build: 0 px on levels 1, 3, 9, 13.
+
+## Item 4, first step: the texture uploads as host records (19 October, afternoon)
+
+The way to the DMA chain walker's removal (item 4, then a host draw list checked against the walker,
+then the walker gone): first the uploads, the bulk of what still goes through the chain as data.
+- An upload in the chain (level 3, read from a RAM dump): a CNT with DIRECT, an A+D tag with
+  BITBLTBUF, TRXREG, TRXDIR (TRXPOS left as the GS holds it), an IMAGE tag, then a REF to the image in
+  the game's memory: 7 qwords.
+- Who writes them (the census): BuildTieTextureDma func_002383D8, BuildShrubTextureDma func_0022B648,
+  BuildTfragTextureDma func_L00_002963D8, the mobys' func_00212258, the upload list's func_L00_0024E798
+  (the HUD's and the sky's pagers add to it).
+- native_2d.c (UYA_NUPL, 0: the game's packets): a hook on each; at its return (an entry found by its
+  return address: func_L00_0024E798 leaves by tail calls, without its exit hook, so its callers
+  func_001F4748 and func_0022C870 are hooked too) every upload it wrote, its layout checked, becomes a
+  marker and a record: the register writes (op 1, the tags' Q reset op 3) and op 22, the data's place;
+  where the chain meets the marker the data is read from the game's memory (when the DMA would have
+  read it) and goes to gs.c with them as op 21 (the transfer's data). Some routines build into a buffer
+  given in a0 and return its size (the chain links it in): that buffer is scanned then; NEXT tags are
+  stepped over (an upload is converted where it is, whatever order the chain takes).
+- Level 3 (software, walking): the IMAGE data through the GIF fell from 4.55 M to 1.51 M qwords over the
+  run (about two thirds as host records); the rest's producers are not yet found. 0 px against
+  UYA_NUPL=0.
+- What this is not yet: the uploads still land in GS memory (the texture store and the stale-TBP
+  fallback read it); textures are not host objects by id. That, the remaining third, then the host
+  draw list are the next steps.
+- Checks: software, all 19 levels, UYA_NUPL=0 vs default: 0 px (four levels differed in the parallel run,
+  with a GPU run going, and matched alone); boot frames 0 px; GPU (Windows build), levels 1, 3, 9, 13:
+  0 px. A first GPU run showed millions of pixels: gl_ab_win.sh only built the replay tool when it was
+  missing, and the old one did not know op 21 (it drops the rest of the draw list); it now always
+  builds it. (The item 2 and 3 GPU checks above had a current replay tool: gl_replay_ab.sh, which always
+  builds it, ran first in the same job.)

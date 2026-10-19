@@ -38,7 +38,7 @@ static int n2d_mode(void)
 /* ---- records ---- */
 #define R_N 16384
 #define R_QW (1u << 19)                     /* the records' ops (qwords, a ring) */
-typedef struct { u32 at, end, q0[4]; u32 off, nq; u32 snap_addr, snap_off, snap_n; } Rec;   /* snap: memory the record was made from, checked again where the chain meets it */
+typedef struct { u32 at, end, q0[4]; u32 off, nq; u32 snap_addr, snap_off, snap_n; u32 upl; } Rec;   /* upl: ops with op 22 (an upload's data, read at the marker) */   /* snap: memory the record was made from, checked again where the chain meets it */
 static Rec *rec; static u32 *ring;
 static u32 rec_next, ring_at;
 static unsigned long long n_made, n_drawn, n_unknown, n_back;
@@ -64,7 +64,7 @@ static void record(u32 at, u32 end, const nd_material *m, const u32 *w, u32 nv, 
     n_made++;
 }
 /* a record of several op 19 blocks (a producer whose material changes inside its packet) */
-static u32 rb_start, rb_ok, rb_snap_addr, rb_snap_off, rb_snap_n;
+static u32 rb_start, rb_ok, rb_snap_addr, rb_snap_off, rb_snap_n, rb_upl;
 static void rec_begin(void)
 {
     if (!rec) { rec = calloc(R_N, sizeof *rec); ring = malloc((size_t)R_QW * 16); if (!rec || !ring) { free(rec); rec = 0; rb_ok = 0; return; } }
@@ -110,7 +110,7 @@ static int rec_end(u32 at, u32 end)
     u32 i = rec_next++ % R_N;
     Rec *r = &rec[i];
     r->at = at; r->end = end; r->off = rb_start; r->nq = (rb_snap_n ? rb_snap_off : ring_at) - rb_start;
-    r->snap_addr = rb_snap_addr; r->snap_off = rb_snap_off; r->snap_n = rb_snap_n;
+    r->snap_addr = rb_snap_addr; r->snap_off = rb_snap_off; r->snap_n = rb_snap_n; r->upl = rb_upl; rb_upl = 0;
     for (int k = 0; k < 4; k++) r->q0[k] = M32(at + 4 * (u32)k);
     rc_sw(at, 0x20000000u); rc_sw(at + 4, end); rc_sw(at + 8, NATIVE_2D_MARK); rc_sw(at + 12, i);
     n_made++;
@@ -125,6 +125,24 @@ int native_2d_tag(const u32 *q, u32 t)
     r->at = 0;
     if (r->snap_n && memcmp(ring + (size_t)r->snap_off * 4, (const void *)RC_A(r->snap_addr), (size_t)r->snap_n * 16)) { n_back++; return 2; }   /* (changed since: the packet as GIF data) */
     extern const char *uya_gs_src; uya_gs_src = "native 2D";
+    if (r->upl) {   /* an upload: its data read now, where the DMA would have read it (op 22 {22, qwords, address} -> op 21 + the data) */
+        static u32 *x; static u32 xcap;
+        const u32 *o = ring + (size_t)r->off * 4;
+        u32 need = r->nq;
+        for (u32 k = 0; k < r->nq; k++) if (o[k * 4] == 22) need += o[k * 4 + 1];
+        if (need > xcap) { free(x); xcap = need + 4096; x = malloc((size_t)xcap * 16); if (!x) { xcap = 0; return 2; } }
+        u32 n = 0;
+        for (u32 k = 0; k < r->nq; k++) {
+            const u32 *c = o + k * 4;
+            if (c[0] != 22) { memcpy(x + n * 4, c, 16); n++; continue; }
+            x[n * 4] = 21; x[n * 4 + 1] = c[1]; x[n * 4 + 2] = 0; x[n * 4 + 3] = 0; n++;
+            memcpy(x + n * 4, (const void *)RC_A(c[2]), (size_t)c[1] * 16); n += c[1];
+        }
+        uya_gs_src = "native texture upload";
+        uya_gs_dlist(x, n);
+        n_drawn++;
+        return 1;
+    }
     uya_gs_dlist(ring + (size_t)r->off * 4, r->nq);
     n_drawn++;
     if (n_drawn == 50 || n_drawn % 20000 == 0) uya_log("native 2D: %llu draws (%llu made), %llu markers not known", n_drawn, n_made, n_unknown);
@@ -1303,4 +1321,111 @@ void uya_rectovl_exit(RcCtx *c)
         if (rec_end(T, T + 0x60)) ro_made++;
         return;
     }
+}
+
+/* ---- the texture uploads (item 4, first step): BuildTieTextureDma func_002383D8, BuildShrubTextureDma
+ * func_0022B648, BuildTfragTextureDma func_L00_002963D8, func_00212258 (the mobys'), func_L00_0024E798 (the
+ * upload list's; it leaves by tail calls, without its exit hook: its callers func_001F4748 and the
+ * sky's func_0022C870 are hooked too, a return finding its entry by the return address) ----
+ * Each upload they write: a CNT with DIRECT, an A+D tag with the transfer's registers (BITBLTBUF, TRXREG,
+ * TRXDIR; TRXPOS when given), an IMAGE tag, then a REF to the image in the game's memory. At the routine's
+ * return each one, its layout checked, becomes a marker and a record: the register writes (op 1, with the
+ * GIF tags' Q reset, op 3) and the data's place (op 22); where the chain meets the marker the data is read
+ * from the game's memory (as the DMA would read it then) and goes with the registers to the GS side as a
+ * host upload (op 21). No upload's data goes through the chain or the GIF. UYA_NUPL=0: the game's packets. */
+static int upl_mode = -1;
+static int nupl_on(void) { if (upl_mode < 0) { const char *e = getenv("UYA_NUPL"); upl_mode = e ? atoi(e) != 0 : n2d_mode() != 0; uya_log("native texture uploads: %s (UYA_NUPL)", upl_mode ? "host records" : "the game's packets"); } return upl_mode; }
+static const u32 up_cws[3] = { 0x161000u, 0x161240u, 0x161280u };
+static u32 up_t0[16][3], up_buf[16], up_ra[16]; static int up_depth;
+static unsigned long long up_enters, up_exits;
+static unsigned long long up_made, up_other;
+static void rec_raw(const u32 *op)
+{
+    if (!rb_ok) return;
+    if (ring_at + 1 > R_QW) { rb_ok = 0; return; }
+    memcpy(ring + (size_t)ring_at * 4, op, 16);
+    ring_at++;
+}
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    (void)c; (void)g; (void)ng; (void)a; (void)na;
+    /* (by the return address: a routine that leaves without its exit hook must not hold the others) */
+    if (up_depth == 16) { memmove(up_t0, up_t0 + 1, sizeof up_t0[0] * 15); memmove(up_buf, up_buf + 1, 4 * 15); memmove(up_ra, up_ra + 1, 4 * 15); up_depth = 15; }
+    for (int k = 0; k < 3; k++) up_t0[up_depth][k] = M32(up_cws[k]);
+    up_buf[up_depth] = (u32)c->r[4].d[0]; up_ra[up_depth] = (u32)c->r[31].d[0];
+    up_depth++; up_enters++;
+    return 0;
+}
+/* the upload at T (a CNT with DIRECT): 1 and its end if it has the layout, its record made when write */
+static int upl_one(u32 T, u32 E, u32 *next, int write)
+{
+    u32 tag = M32(T), qwc = tag & 0xFFFF;
+    if ((tag & 0xFFFF0000u) != 0x10000000u || M32(T + 4) || M32(T + 8) || M32(T + 12) != (0x50000000u | qwc) || qwc < 3 || qwc > 6) return 0;
+    u32 D = T + 16, n = qwc - 2;
+    if (M64(D) != (0x1000000000000000ull | n) || M64(D + 8) != 0xE) return 0;
+    u32 ra[4]; u64 rv[4]; int dir = 0;
+    for (u32 k = 0; k < n; k++) {
+        rv[k] = M64(D + 16 + 16 * k); u64 ad = M64(D + 24 + 16 * k);
+        if (ad < 0x50 || ad > 0x53) return 0;
+        ra[k] = (u32)ad;
+        if (ad == 0x53) { if (k != n - 1 || rv[k] != 0) return 0; dir = 1; }
+    }
+    if (!dir) return 0;
+    u64 it = M64(D + 16 + 16 * n), ih = M64(D + 24 + 16 * n);
+    u32 nl = (u32)(it & 0x7FFF);
+    if ((it & ~0x7FFFull) != 0x0800000000008000ull || ih || !nl) return 0;
+    u32 R = T + 16 * (qwc + 1);
+    if (R + 16 > E || M32(R) != (0x30000000u | nl) || M32(R + 8) || M32(R + 12) != (0x50000000u | nl)) return 0;
+    u32 src = M32(R + 4);
+    if (src < 0x100000u || src + nl * 16 > 0x2000000u || (src & 15)) return 0;
+    *next = R + 16;
+    if (!write) return 1;
+    if (ring_at + 16 > R_QW) ring_at = 0;
+    rec_begin();
+    u32 op[4] = { 3, 0, 0, 0 };
+    rec_raw(op);                                   /* (the A+D tag: Q 1.0) */
+    for (u32 k = 0; k < n; k++) { op[0] = 1; op[1] = ra[k]; op[2] = (u32)rv[k]; op[3] = (u32)(rv[k] >> 32); rec_raw(op); }
+    op[0] = 3; op[1] = 0; op[2] = 0; op[3] = 0; rec_raw(op);   /* (the IMAGE tag) */
+    op[0] = 22; op[1] = nl; op[2] = src; op[3] = 0; rec_raw(op);
+    rb_upl = 1;
+    return rec_end(T, R + 16);
+}
+void uya_texdma_exit(RcCtx *c)
+{
+    u32 ra = (u32)c->r[31].d[0];
+    int d = up_depth - 1;
+    while (d >= 0 && up_ra[d] != ra) d--;
+    if (d < 0) return;
+    up_depth = d; up_exits++;
+    if (!nupl_on()) return;
+    u32 cw = 0, T = 0;
+    for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]); if (e > up_t0[d][k] && e - up_t0[d][k] < 0x100000u && !(up_t0[d][k] & 15) && chain_word_ok(up_cws[k])) { if (cw) return; cw = up_cws[k]; T = up_t0[d][k]; } }
+    u32 E = cw ? M32(cw) : 0;
+    if (!cw) {   /* (the chain pointer not moved: the routine built into the buffer given in a0, its size returned) */
+        u32 b = up_buf[d], sz = (u32)c->r[2].d[0];
+        if (b < 0x100000u || (b & 15) || !sz || sz > 0x400000u || b + sz > 0x2000000u) return;
+        T = b; E = b + sz;
+    }
+    while (T < E) {
+        u32 tag = M32(T), nx;
+        if (tag == 0x20000000u && M32(T + 8) == NATIVE_2D_MARK && M32(T + 4) > T && M32(T + 4) <= E) { T = M32(T + 4); continue; }   /* (a record already) */
+        if (upl_one(T, E, &nx, 0)) { if (upl_one(T, E, &nx, 1)) up_made++; else up_other++; T = nx; continue; }
+        if ((tag >> 28 & 7) == 1 && M32(T + 4) == 0) {   /* (a CNT of another kind: as it is) */
+            {   /* testing: UYA_NUPLLOG=1 logs a few of these that hold an IMAGE tag */
+                static int on = -1, left = 8; if (on < 0) on = getenv("UYA_NUPLLOG") != 0;
+                u32 q = tag & 0xFFFF, img = 0;
+                for (u32 k = 1; k <= q && k < 16; k++) if (((M64(T + 16 * k) >> 58) & 3) == 2) img = k;
+                if (on && left > 0 && (img || (M32(T + 16) == 3 && M32(T + 20) == 0x10000000u))) { left--;
+                    uya_log("native texture uploads: not taken at %08X (%u qwords, IMAGE tag at %u):", T, q, img);
+                    for (u32 k = 0; k <= q + 2 && k < 10; k++) uya_log("   %08X: %08X %08X %08X %08X", T + 16 * k, M32(T + 16 * k), M32(T + 16 * k + 4), M32(T + 16 * k + 8), M32(T + 16 * k + 12)); }
+            }
+            T += 16 * ((tag & 0xFFFF) + 1); up_other++; continue;
+        }
+        if ((tag >> 28 & 7) == 3) { T += 16; up_other++; continue; }   /* (a REF of another kind) */
+        if ((tag >> 28 & 7) == 2 && (tag & 0xFFFF) == 0) { T += 16; continue; }   /* (a NEXT: the packets written after it are converted where they are) */
+        { static int t; if (t < 3) { t++; uya_log("native texture uploads: tag %08X %08X %08X %08X at %08X: the rest as it is", tag, M32(T + 4), M32(T + 8), M32(T + 12), T); } }
+        break;
+    }
+    static unsigned long long next = 1;
+    if (up_made >= next) { next = next < 100000 ? next * 10 : next + 100000; uya_log("native texture uploads: %llu as host records, %llu other packets", up_made, up_other); }
 }

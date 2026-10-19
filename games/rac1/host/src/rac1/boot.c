@@ -31,7 +31,7 @@ void rac1_test_hooks(void)
     static int done;
     static long stop = -2;
     if (stop == -2) { const char *s = getenv("UYA_VSYNCS"); stop = s ? atol(s) : -1; }
-    if (stop > 0 && uya_frame_count() >= (uint32_t)stop) { uya_log("UYA_VSYNCS=%ld reached", stop); exit(0); }
+    if (stop > 0 && uya_frame_count() >= (uint32_t)stop) { void native_direct_stats(void); native_direct_stats(); uya_log("UYA_VSYNCS=%ld reached", stop); exit(0); }
     const char *e = getenv("UYA_LEVEL");
     if (!e || done || rac1_current_level()) return;
     int lvl = atoi(e);

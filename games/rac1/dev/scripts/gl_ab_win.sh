@@ -6,7 +6,7 @@
 cd ~/solana-dev/rac1/dev/tests
 export RAC1_ISO=${RAC1_ISO:-$HOME/rac1.iso}
 unset DISPLAY WAYLAND_DISPLAY
-[ -x out/gs_replay_gl ] || ./build_replay.sh || exit 1
+./build_replay.sh > /dev/null 2>&1 || { echo "replay build failed"; exit 1; }   # (always: a replay tool older than the GS side reads new ops wrong)
 a=$1; b=$2; levels=$3; va=$4; vb=$5
 S=$(dirname "$(readlink -f "$0")")
 W=$(wslpath "$(cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r')")/solana-test

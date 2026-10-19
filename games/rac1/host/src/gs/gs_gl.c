@@ -498,6 +498,7 @@ static void download(tgt_t *t, const u16 *pg, int n)
         if (row > r1) r1 = row;
     }
     if (c1 < 0) return;
+    { void gs_vram_need(u32, u32); for (int i = 0; i < n; i++) gs_vram_need(pg[i], pg[i]); }   /* (GS memory's older uploads there first: UYA_LAZYVRAM) */
     {   /* testing: UYA_GLDLLOG=1 logs every readback and why */
         static int dbg = -1; if (dbg < 0) dbg = getenv("UYA_GLDLLOG") != 0;
         if (dbg) uya_log("download v%u: target %04X/%u cls %u, %d pages from %u (%s)", uya_frame_count(), t->bp, t->bw, t->cls, n, pg[0], dl_why); }
@@ -542,6 +543,7 @@ static void download(tgt_t *t, const u16 *pg, int n)
 /* vram into the target's copy of a page */
 static void upload_page(tgt_t *t, int col, int row)
 {
+    { void gs_vram_need(u32, u32); u32 p = tpage(t, col, row); gs_vram_need(p, p); }   /* (UYA_LAZYVRAM) */
     u32 *buf = xb((size_t)64 * 64 * 4 * (sc * sc + 1));
     u16 *v16 = (u16 *)vram;
     for (int yy = 0; yy < t->ph; yy++) {

@@ -273,11 +273,14 @@ static int clut_from_upload(u64 t0)
     clut_hash_set();
     return 1;
 }
+static void vram_need(u32 p0, u32 p1);           /* (UYA_LAZYVRAM, below) */
+static void vram_need_blocks(u32 bp, u32 nb);
 /* the palette into clut[] (CSM1) */
 static void clut_read(u64 t0)
 {
     n_pal_mem++;
     u32 psm = BITS(t0, 20, 6), cbp = BITS(t0, 37, 14), cpsm = BITS(t0, 51, 4), csa = BITS(t0, 56, 5);
+    vram_need_blocks(cbp, 4);
     u32 cp = (cpsm == 0) ? 0x00 : (cpsm == 0xA ? 0x0A : 0x02);
     if ((psm == 0x13 || psm == 0x1B) && cp == 0x00) {   /* the same as below, the 32-bit reads inline */
         for (u32 i = 0; i < 256; i++) {
@@ -441,6 +444,7 @@ typedef struct urec_s {
     u16 *blk; u32 *gen;                /* its blocks and their generations after it */
     u32 pg0, pg1, *pgen;               /* its pages and their draw generations */
     u8 *px; u32 cap;                   /* the pixels, w * h of 1 (PSMT8) or 4 (PSMCT32) bytes */
+    u32 pending, seq;                  /* (UYA_LAZYVRAM) its pixels not yet in GS memory; its order among uploads */
 } urec_t;
 /* (enough that the level's resident uploads, made once at its load: palettes, mip levels 2 and 3,
  * shrub billboards, stay while the streamed ones come and go) */
@@ -472,6 +476,7 @@ static void urec_transfer(u32 dir)
         if (!x->complete || !x->nblk || x->bp >= 0x4000 || urec_at[x->bp] != s_ + 1 || blk_gen[x->blk[0]] != x->gen[0]) { slot = s_; break; }
     }
     urec_t *r = &urec[slot];
+    if (r->pending) vram_need(r->pg0, r->pg1);   /* (UYA_LAZYVRAM: its pixels into GS memory before the slot is reused) */
     if (r->bp < 0x4000 && urec_at[r->bp] == slot + 1) urec_at[r->bp] = 0;
     urec_cur = slot; urec_head = (slot + 1) % UREC_N;
     u32 bpp = dpsm == 0x13 ? 1 : 4;
@@ -504,6 +509,89 @@ static inline void urec_data(u32 x, u32 y, const u8 *d, u32 n)
     r->hash = hsh;
     if (y == r->h - 1 && x + n == r->w) r->complete = 1;
 }
+/* ---- GS memory as a derived store (UYA_LAZYVRAM; GL only) ----
+ * An upload kept here (urec) is not written into GS memory as it arrives: its pixels are the texture,
+ * and GS memory is filled in, upload by upload in their order, only for pages something reads or
+ * writes there other than through the uploads (a texture or palette decoded from GS memory, a
+ * transfer's other side, a GPU target's sync, a readback, a snapshot). An upload a later one covers
+ * block for block is dropped; one whose data comes by the per-pixel path is written as it comes (the
+ * pixels before it first). The software renderer (the reference, drawing in GS memory) keeps the eager
+ * writes. UYA_LAZYVRAM=0: every upload into GS memory as it arrives. */
+static int lazy_on = -1, lz_cur = -1, lz_any;
+static u32 lz_seq;
+static unsigned long long lz_made, lz_dropped, lz_written;
+static int lazy(void) { if (lazy_on < 0) { const char *e = getenv("UYA_LAZYVRAM"); lazy_on = e ? atoi(e) != 0 : 1; } return lazy_on && gsgl_on && ntex_on > 0; }
+static void urec_write_px(const urec_t *r, u32 npx)
+{
+    u32 bpp = r->psm == 0x13 ? 1 : 4;
+    for (u32 n = 0; n < npx; n++) {
+        u32 x = n % r->w, y = n / r->w, v;
+        if (bpp == 1) v = r->px[n]; else memcpy(&v, r->px + n * 4, 4);
+        px_write(r->psm, r->bp, r->bw, x, y, v);
+    }
+}
+static void vram_need(u32 p0, u32 p1)
+{
+    if (!lz_any) return;
+    if (p1 > 511) p1 = 511;
+    static u8 S[512];
+    memset(S, 0, sizeof S);
+    for (u32 p = p0; p <= p1; p++) S[p] = 1;
+    /* the pages grow by every pending upload that meets them (an older one under a newer one goes first) */
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (int i = 0; i < UREC_N; i++) {
+            urec_t *r = &urec[i];
+            if (!r->pending) continue;
+            int meets = 0;
+            for (u32 p = r->pg0; p <= r->pg1 && !meets; p++) meets = S[p];
+            if (!meets) continue;
+            for (u32 p = r->pg0; p <= r->pg1; p++) if (!S[p]) { S[p] = 1; changed = 1; }
+        }
+    }
+    static int idx[UREC_N]; int n = 0;
+    for (int i = 0; i < UREC_N; i++) {
+        urec_t *r = &urec[i];
+        if (!r->pending) continue;
+        for (u32 p = r->pg0; p <= r->pg1; p++) if (S[p]) { idx[n++] = i; break; }
+    }
+    for (int a = 1; a < n; a++) { int v = idx[a], b = a; while (b > 0 && urec[idx[b - 1]].seq > urec[v].seq) { idx[b] = idx[b - 1]; b--; } idx[b] = v; }
+    for (int k = 0; k < n; k++) { urec_t *r = &urec[idx[k]]; urec_write_px(r, r->w * r->h); r->pending = 0; lz_written++; }
+    lz_any = 0;
+    for (int i = 0; i < UREC_N && !lz_any; i++) lz_any = urec[i].pending;
+}
+void gs_vram_need(u32 p0, u32 p1) { vram_need(p0, p1); }
+static void vram_need_blocks(u32 bp, u32 nb) { if (lz_any) vram_need(bp / 32, (bp + (nb ? nb : 1) - 1) / 32); }
+/* the upload being received leaves the lazy path: its first npx pixels into GS memory (after the
+ * pending uploads under it), the rest written as it comes */
+static void lz_abandon(u32 npx)
+{
+    if (lz_cur < 0) return;
+    urec_t *r = &urec[lz_cur];
+    lz_cur = -1;
+    vram_need(r->pg0, r->pg1);
+    if (npx > r->w * r->h) npx = r->w * r->h;
+    urec_write_px(r, npx);
+}
+/* the upload received whole: pending (and the older pending ones it covers block for block dropped) */
+static void lz_done(void)
+{
+    if (lz_cur < 0) return;
+    urec_t *r = &urec[lz_cur];
+    lz_cur = -1;
+    static u32 stamp[0x4000], sgen;
+    sgen++;
+    for (u32 k = 0; k < r->nblk; k++) stamp[r->blk[k]] = sgen;
+    for (int i = 0; i < UREC_N; i++) {
+        urec_t *y = &urec[i];
+        if (!y->pending || y == r || !y->nblk) continue;
+        u32 k = 0; while (k < y->nblk && stamp[y->blk[k]] == sgen) k++;
+        if (k == y->nblk) { y->pending = 0; lz_dropped++; }
+    }
+    r->pending = 1; r->seq = ++lz_seq; lz_any = 1; lz_made++;
+    if ((lz_made & 0xFFFF) == 1) uya_log("GS memory as a derived store: %llu uploads kept out, %llu dropped (covered), %llu written in when needed", lz_made, lz_dropped, lz_written);
+}
+
 /* the kept upload a texture level (PSMT8 or PSMCT32) is, or is the top left corner of (the same
  * buffer width: texel (x, y) is then the upload's pixel (x, y)), if it is still what memory holds */
 static const urec_t *urec_find(u32 psm, u32 tbp, u32 tbw, u32 tw, u32 th)
@@ -798,7 +886,7 @@ static const tcache_t *tc_get(const gs_ctx_t *c, int lvl)
             /* the bytes decide, unless a GPU target owns some of those pages (GL: GS memory is not current there) */
             if ((dbg_drain_all & 128) || (gsgl_on && gsgl_tex_owned(psm, tbp, tbw, tw, th))) { x->used = 0; x->k1 = ~0ull; stale_seen = 1; continue; }
             if (range_drawn(p0 * 32, (p1 - p0 + 1) * 32)) gs_drain();   /* queued draws may still write those pages */
-            if (!have_ch) { ch = pages_content(p0, p1); have_ch = 1; }
+            if (!have_ch) { vram_need(p0, p1); ch = pages_content(p0, p1); have_ch = 1; }
             if (x->ch == ch) { x->sum = sum; x->epoch = dirty_epoch; e = x; n_tc_reuse++; break; }
             stale_seen = 1;
         }
@@ -810,6 +898,7 @@ static const tcache_t *tc_get(const gs_ctx_t *c, int lvl)
          * entry's old pixels may still be in use by queued draws, so they are
          * retired (freed once the workers are past them), not overwritten */
         if (!rec && (dbg_drain_all & 1 || range_drawn(p0 * 32, (p1 - p0 + 1) * 32))) gs_drain();
+        if (!rec) vram_need(p0, p1);
         else if (dbg_drain_all & 8) dbg_race(p0, p1, "texture", tbp);
         n_tc_build++;
         if (trxlog_on()) uya_log("tex build lvl %d TBP %04X TBW %u PSM %X %ux%u k2 %llX pages %u-%u", lvl, tbp, tbw, psm, tw, th, (unsigned long long)k2, p0, p1);
@@ -2157,8 +2246,10 @@ static u32 pages_sum(u32 bp, u32 n)
 }
 static u32 si_hash[0x4000];   /* testing: the VRAM StoreImage saved, by block (UYA_SICHECK) */
 static u32 vhash(u32 bp, u32 nb) { u32 h = 2166136261u; for (u32 i = bp * 64; i < (bp + nb) * 64 && i < (1u << 20); i++) h = (h ^ vram[i]) * 16777619u; return h; }
+static void lz_done(void);
 static void trx_finish(void)
 {
+    lz_done();
     {   static int on = -1; if (on < 0) on = getenv("UYA_SICHECK") != 0;
         u32 dbp = BITS(bitbltbuf, 32, 14);
         if (on && si_hash[dbp] && BITS(bitbltbuf, 48, 6) == 1) { uya_log("restore %04X: VRAM %s the saved data", dbp, (vhash(dbp, 0x40) | 1) == si_hash[dbp] ? "matches" : "DIFFERS from"); si_hash[dbp] = 0; }
@@ -2210,7 +2301,14 @@ static void trx_start(u32 dir)
         sv_cur_by = 0xFFFF;
         sv_mark(dbp_, sv_blocks(dpsm_, dbw_, BITS(trxpos, 48, 11) + BITS(trxreg, 32, 12)), dir == 0 ? SV_UP : SV_COPY, (u8)dpsm_);
     }
+    {   /* (UYA_LAZYVRAM) GS memory current where the transfer reads or (not as a kept upload) writes */
+        u32 h_ = BITS(trxreg, 32, 12);
+        if (dir == 1 || dir == 2) vram_need_blocks(BITS(bitbltbuf, 0, 14), area_blocks(BITS(bitbltbuf, 24, 6), BITS(bitbltbuf, 16, 6), BITS(trxpos, 16, 11) + h_));
+    }
+    lz_abandon(trx_y * BITS(trxreg, 0, 12) + trx_x);   /* (an upload left unfinished: its pixels so far) */
     if (dir == 0 || dir == 2) urec_transfer(dir);
+    if (dir == 0 && urec_cur >= 0 && lazy() && urec[urec_cur].bp == BITS(bitbltbuf, 32, 14)) lz_cur = urec_cur;
+    else if (dir == 0 || dir == 2) vram_need_blocks(BITS(bitbltbuf, 32, 14), area_blocks(BITS(bitbltbuf, 56, 6), BITS(bitbltbuf, 48, 6), BITS(trxpos, 48, 11) + BITS(trxreg, 32, 12)));
     trx_active = 0;
     if (trx_pend) { mark_blocks(trx_rbp, trx_rn); trx_pend = 0; }   /* an unfinished upload */
     if (dir == 0 || dir == 2) {
@@ -2235,6 +2333,7 @@ static void trx_start(u32 dir)
 static void trx_pixel(u32 v)
 {
     n_trx_px++;
+    if (lz_cur >= 0) lz_abandon(trx_y * BITS(trxreg, 0, 12) + trx_x);   /* (UYA_LAZYVRAM: not the fast path: written as it comes) */
     u32 dbp = BITS(bitbltbuf, 32, 14), dbw = BITS(bitbltbuf, 48, 6), dpsm = BITS(bitbltbuf, 56, 6);
     u32 dx = BITS(trxpos, 32, 11), dy = BITS(trxpos, 48, 11);
     u32 w = BITS(trxreg, 0, 12), h = BITS(trxreg, 32, 12);
@@ -2275,7 +2374,8 @@ static void trx_data_(const u8 *d, u32 bytes)
                     u32 X = (dx + trx_x + k) & 2047, n = 16 - (X & 15);
                     if (n > run - k) n = run - k;
                     u32 base = a8(dbp, dbw, X & ~15u, y) - col[0];
-                    for (u32 j = 0; j < n; j++) { u32 v = d[i + k + j]; vram8()[base + col[(X & 15) + j]] = (u8)v; hsh = (hsh ^ v) * 16777619u; }
+                    if (lz_cur >= 0) for (u32 j = 0; j < n; j++) { u32 v = d[i + k + j]; hsh = (hsh ^ v) * 16777619u; }   /* (kept out of GS memory) */
+                    else for (u32 j = 0; j < n; j++) { u32 v = d[i + k + j]; vram8()[base + col[(X & 15) + j]] = (u8)v; hsh = (hsh ^ v) * 16777619u; }
                     k += n;
                 }
                 if (urec_cur >= 0) urec_data(trx_x, trx_y, d + i, run);
@@ -2286,7 +2386,8 @@ static void trx_data_(const u8 *d, u32 bytes)
                     u32 X = (dx + trx_x + k) & 2047, n = 8 - (X & 7);
                     if (n > run - k) n = run - k;
                     u32 base = a32(dbp, dbw, X & ~7u, y) - col[0];
-                    for (u32 j = 0; j < n; j++) { u32 v; memcpy(&v, d + i + 4 * (k + j), 4); vram[base + col[(X & 7) + j]] = v; hsh = (hsh ^ v) * 16777619u; }
+                    if (lz_cur >= 0) for (u32 j = 0; j < n; j++) { u32 v; memcpy(&v, d + i + 4 * (k + j), 4); hsh = (hsh ^ v) * 16777619u; }   /* (kept out of GS memory) */
+                    else for (u32 j = 0; j < n; j++) { u32 v; memcpy(&v, d + i + 4 * (k + j), 4); vram[base + col[(X & 7) + j]] = v; hsh = (hsh ^ v) * 16777619u; }
                     k += n;
                 }
                 if (urec_cur >= 0) urec_data(trx_x, trx_y, d + i, run);
@@ -2460,6 +2561,7 @@ static void rec_vsync(const u64 *r)
     if (!rec_f) { rec_vs++; return; }
     if (rec_vs == rec_from) {
         u32 m = 0x52534755u; rec_put(&m, 4);
+        vram_need(0, 511);
         if (gsgl_on) gsgl_cpu_read(0, 0x4000);
 #define X(f) { u32 n_ = sizeof f; rec_put(&n_, 4); rec_put(&f, sizeof f); }
         GS_SNAP_FIELDS(X)
@@ -3036,6 +3138,11 @@ static void gs_dlist_(const u32 *d, u32 qwc)
         switch (c[0]) {
         case 1: uya_gs_write(c[1], ((u64)c[3] << 32) | c[2]); q++; break;
         case 3: qreg = 1.0f; q++; break;
+        case 21: {  /* a texture upload's image data (after its transfer registers, op 1): {21, qwords} + the data */
+            u32 n = c[1];
+            if (trx_active) trx_data((const u8 *)(c + 4), n * 16);
+            q += 1 + n;
+        } break;
         case 2: {
             u32 n = c[1];
             const u32 *v = c + 4;
@@ -3111,6 +3218,22 @@ static void gs_dlist_(const u32 *d, u32 qwc)
         default: q = qwc; break;
         }
     }
+}
+/* a texture upload from host code (the GS library's sceGsExecLoadImage): the transfer's registers and its
+ * data as host ops, as a GIF packet with them would leave the GS (its tags' Q reset) */
+void uya_gs_dlist(const u32 *d, u32 qwc);
+void uya_gs_upload(u64 bitbltbuf_, u64 trxpos_, u64 trxreg_, const void *data, u32 qwc)
+{
+    static u32 *b; static u32 cap;
+    if (qwc + 8 > cap) { free(b); cap = qwc + 4096; b = malloc((size_t)cap * 16); if (!b) { cap = 0; return; } }
+    u32 n = 0;
+    const u32 ra[4] = { 0x50, 0x51, 0x52, 0x53 }; const u64 rv[4] = { bitbltbuf_, trxpos_, trxreg_, 0 };
+    b[0] = 3; b[1] = b[2] = b[3] = 0; n++;
+    for (int k = 0; k < 4; k++) { u32 *o = b + n * 4; o[0] = 1; o[1] = ra[k]; o[2] = (u32)rv[k]; o[3] = (u32)(rv[k] >> 32); n++; }
+    { u32 *o = b + n * 4; o[0] = 3; o[1] = o[2] = o[3] = 0; n++; }
+    { u32 *o = b + n * 4; o[0] = 21; o[1] = qwc; o[2] = o[3] = 0; n++; }
+    memcpy(b + n * 4, data, (size_t)qwc * 16); n += qwc;
+    uya_gs_dlist(b, n);
 }
 int uya_gs_renderer_gl(void) { return gsgl_on; }   /* (the GPU renderer draws: native meshes are clipped there) */
 /* a native draw list from the game's thread: run here, or queued for the GS thread */
@@ -3354,7 +3477,7 @@ static void fps_log(void)
             c0 = c1; g0 = uya_t_gs; v0 = uya_t_vu;
             t0 = t1;
         }
-        if (++vn == want) { if (gsgl_on) gsgl_cpu_read(0, 0x4000); FILE *f = fopen("vram.bin", "wb"); if (f) { fwrite(vram, 4, 1 << 20, f); fclose(f); } uya_log("VRAM saved at vsync %ld", vn); }
+        if (++vn == want) { vram_need(0, 511); if (gsgl_on) gsgl_cpu_read(0, 0x4000); FILE *f = fopen("vram.bin", "wb"); if (f) { fwrite(vram, 4, 1 << 20, f); fclose(f); } uya_log("VRAM saved at vsync %ld", vn); }
     }
 }
 /* GL: the display drawn into the window */
@@ -3453,6 +3576,7 @@ void uya_gs_write_ct32(u32 tbp, u32 tbw, int w, int h, const u32 *rgba)
     gs_drain();
     if (rec_f && rec_vs > rec_from) { u32 hd[5] = { 3, tbp, tbw, (u32)w, (u32)h }; rec_put(hd, 20); rec_put(rgba, (size_t)w * h * 4); }
     gl_mem_req(1, 0, tbp, tbw, 0, 0, (u32)w, (u32)h);
+    vram_need_blocks(tbp, area_blocks(0, tbw, (u32)h));
     mark_blocks(tbp, area_blocks(0, tbw, (u32)h));
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) vram[a32(tbp, tbw, (u32)x, (u32)y)] = rgba[y * w + x];
@@ -3466,6 +3590,7 @@ void uya_gs_store_image(u32 bp, u32 bw, u32 psm, u32 x, u32 y, u32 w, u32 h, voi
     gs_sync();
     gs_drain();
     gl_mem_req(0, psm, bp, bw, x, y, w, h);
+    vram_need_blocks(bp, area_blocks(psm, bw, y + h));
     if (bw == 1 && psm == 0 && w == 64 && h == 64 && bp < 0x4000) si_hash[bp] = vhash(bp, 0x40) | 1;
     u32 bits = trx_bits(psm), n = 0;
     u8 *o = dst;

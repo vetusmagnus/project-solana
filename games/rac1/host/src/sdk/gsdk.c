@@ -121,6 +121,15 @@ static const u32 *ps2_ptr(const void *p)
 /* 0x0012CCC8: sceGsExecLoadImage(lp, src): sends the packet then the pixels over GIF channel 2 */
 s32 uyafn_12CCC8(u64 *lp, void *src)
 {
+    /* (as host ops, not a GIF packet: the transfer's registers, then its data; UYA_NUPL=0: the GIF packet) */
+    static int hu = -1; if (hu < 0) { const char *e = getenv("UYA_NUPL"); hu = e ? atoi(e) != 0 : 1; }
+    const u64 *l = (const u64 *)ps2_ptr(lp);
+    if (hu && l[0] == (4 | 0x8000 | (1ull << 60)) && l[1] == 0xE && l[3] == 0x50 && l[5] == 0x51 && l[7] == 0x52 && l[8] == 0 && l[9] == 0x53 && (l[10] & ~0x7FFFull) == (0x8000 | (2ull << 58)) && !l[11]) {
+        extern const char *uya_gs_src; uya_gs_src = "GS library upload";
+        void uya_gs_upload(u64, u64, u64, const void *, u32);
+        uya_gs_upload(l[2], l[4], l[6], ps2_ptr(src), (u32)(l[10] & 0x7FFF));
+        return 0;
+    }
     { extern const char *uya_gs_src; uya_gs_src = "PATH3 (GS library)"; }
     native_gif(2, ps2_ptr(lp), 6);
     native_gif(2, ps2_ptr(src), (u32)(lp[10] & 0x7FFF));

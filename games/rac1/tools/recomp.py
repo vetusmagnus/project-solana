@@ -87,7 +87,16 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_001FB530": "uya_clearref",      # the screen clear's REF (native_2d.c)
               "func_001F856C": "uya_fogfan",
               "func_001F55C0": "uya_fadeset",      # a full-screen fade's REF (native_2d.c)
-              "func_001F5650": "uya_rectovl"}      # DrawRectOverlay (native_2d.c)        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+              "func_001F5650": "uya_rectovl",      # DrawRectOverlay (native_2d.c)
+              "func_002383D8": "uya_texdma",       # BuildTieTextureDma: texture uploads as host records (native_2d.c)
+              "func_0022B648": "uya_texdma",       # BuildShrubTextureDma
+              "func_L00_002963D8": "uya_texdma",   # BuildTfragTextureDma (level code)
+              "func_00212258": "uya_texdma",       # the mobys' texture uploads
+              "func_L00_0024E798": "uya_texdma",   # the upload list's (level code; it leaves by tail calls, so its callers too:)
+              "func_001F4748": "uya_texdma",       # the frame's upload list
+              "func_0022C870": "uya_texdma",       # the sky's pager and its uploads
+              "func_0020C2F8": "uya_texdma",       # the upload list's sender, the executable's copy (the boot screens)
+              "func_00236060": "uya_texdma"}       # BuildTfragTextureDma, the executable's copy        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
 HOST_HOOKS_ALLREFS = {"uya_hudsprite", "uya_hudflip", "uya_clearref", "uya_addgsreg", "uya_setscissor", "uya_stencilclr", "uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",

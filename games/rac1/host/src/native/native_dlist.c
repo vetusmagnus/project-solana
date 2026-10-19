@@ -12,6 +12,8 @@
 #include "native_dlist.h"
 #include "native_draw.h"
 #include <stdlib.h>
+#include <stdio.h>
+#include "uya_runtime.h"
 #include <string.h>
 
 void uya_gif_packet(const u32 *data, u32 qwc);
@@ -148,6 +150,15 @@ void native_gif(int path, const u32 *d, u32 qwc)
             u32 avail = qwc - q - 1 < len ? qwc - q - 1 : len;
             FLUSH();
             uya_gif_packet(t, 1 + avail); dir_n[flg >= 2 ? 1 : 2] += 1 + avail;
+            if (flg == 2) {   /* testing: UYA_IMGLOG=v0,n logs n IMAGE tags from vsync v0: the path, the chain's last tag, the transfer */
+                static int left = -1; static unsigned v0;
+                if (left < 0) { const char *e = getenv("UYA_IMGLOG"); left = 0; if (e) sscanf(e, "%u,%d", &v0, &left); }
+                if (left > 0 && uya_frame_count() >= v0) {
+                    left--; extern u32 uya_dma_tag_ring[16][5], uya_dma_tag_n; const u32 *r = uya_dma_tag_ring[(uya_dma_tag_n - 1) & 15];
+                    extern const char *uya_gs_src;
+                    uya_log("IMAGE v%u path %d [%s] %u qwords at %08X; the chain's last tag at %08X: %08X %08X %08X %08X", uya_frame_count(), path, uya_gs_src, nloop, (u32)(uintptr_t)t, r[0], r[1], r[2], r[3], r[4]);
+                }
+            }
             p_left[path] = len - avail; p_img[path] = flg >= 2; q += 1 + avail;
             continue;
         }

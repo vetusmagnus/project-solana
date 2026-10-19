@@ -4,6 +4,9 @@
 #include "uya_host.h"
 /* a draw the native code built in the PS2's GIF layout (a PATH1 packet, to its EOP) */
 void native_kick(const u32 *pk, u32 qwc);
+/* GIF data the game built itself (path 1: VIF1 DIRECT, PATH2; 2: PATH3), as ops where it can */
+void native_gif(int path, const u32 *d, u32 qwc);
+void native_direct_stats(void);
 
 /* native meshes: geometry kept by the renderer (on the GPU), drawn with a transform each time.
  * id: the caller's (0..32767: terrain 0.., ties 16384.., shrubs 20480.., mobys 24576..). v6: x y z w s t per vertex (w: the weight of the transform's row 3,

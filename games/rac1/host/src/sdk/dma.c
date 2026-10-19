@@ -73,6 +73,8 @@ unsigned long long nsends, nqw;
 void uya_vif1_data(const u32 *data, u32 qwc);
 void uya_vif1_words(const u32 *data, u32 nwords);
 void uya_gs_gif(const u32 *d, u32 qwc);
+void native_gif(int path, const u32 *d, u32 qwc);
+void native_direct_stats(void);
 void uya_vif0_data(const u32 *data, u32 qwc);
 void uya_vif0_words(const u32 *data, u32 nwords);
 static void uya_dma_sink(s32 ch, const void *data, u32 qwc)
@@ -80,11 +82,14 @@ static void uya_dma_sink(s32 ch, const void *data, u32 qwc)
     nqw += qwc;
     if (ch == 0) { uya_vif0_data(data, qwc); return; }
     if (ch == 1) uya_vif1_data(data, qwc);
-    if (ch == 2) { extern const char *uya_gs_src; uya_gs_src = "PATH3 (DMA ch2)"; uya_gs_gif(data, qwc); }   /* GIF channel: PATH3 */
+    if (ch == 2) { extern const char *uya_gs_src; uya_gs_src = "PATH3 (DMA ch2)"; native_gif(2, data, qwc); }   /* GIF channel: PATH3 */
 }
 
 /* a VIF1 chain tag the terrain hook kept, sent on as the walker would have */
 #include "../native/native_terrain.h"
+#include "../native/native_tie.h"
+#include "../native/native_shrub.h"
+#include "../native/native_moby.h"
 void uya_dma_vif1_replay(const u32 *q, int tte)
 {
     u32 qwc = q[0] & 0xFFFF, id = (q[0] >> 28) & 7, addr = q[1] & 0x7FFFFFFF;
@@ -92,6 +97,9 @@ void uya_dma_vif1_replay(const u32 *q, int tte)
     if (id == 3 || id == 4) uya_dma_sink(1, phys(addr), qwc);
     else uya_dma_sink(1, q + 4, qwc);
 }
+
+/* testing: the last VIF1 chain tags walked (UYA_STARTLOG in gfx/vu.c lists them) */
+u32 uya_dma_tag_ring[16][5], uya_dma_tag_n;
 
 static s32 chan_index(void *chan)
 {
@@ -123,8 +131,24 @@ s32 uyafn_12D938(void *chan, void *tag)
             uya_vif_log = (long long)nsends == dlog;
             if (uya_vif_log) uya_log("  DMA tag at 0x%08X: id %u qwc %u addr 0x%08X upper %08X %08X", t, id, qwc, addr, q[2], q[3]);
         }
+        if (ch == 1) { u32 *e = uya_dma_tag_ring[uya_dma_tag_n++ & 15]; e[0] = t; e[1] = lo; e[2] = hi; e[3] = q[2]; e[4] = q[3]; }
         /* terrain draws in the chain become native mesh draws (host/src/native/native_terrain.c) */
         if (ch == 1) {
+            /* mobys from the native MobyProc: a marker (a NEXT past the run) names a run of them
+             * (host/src/native/native_mobyseg.c): drawn (1), or its first qword put back and read
+             * again (2: the run goes through the chain); else the NEXT skips the run */
+            if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_MOBY_MARK) {
+                native_terrain_flush();
+                int r = native_moby_tag(q, t, tte != 0);
+                if (r == 1) { t = addr; continue; }
+                if (r == 2) continue;
+            }
+            /* (testing, UYA_NMOBYDIRECT=1: a run's first CNT with a check marker; the tag goes on as it is) */
+            if (!irq && id == 1 && (q[1] >> 16) == NATIVE_MOBY_CHKMARK) native_mobyseg_chk_begin(q[1] & 0xFFFF, t);
+            /* ties from the native TieProc: a marker names a run of them (host/src/native/native_tie.c) */
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_TIE_MARK) { native_terrain_flush(); if (native_tie_tag(q)) { t += 16; continue; } }
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_SHRUB_MARK) { native_terrain_flush(); if (native_shrub_tag(q)) { t += 16; continue; } }
+            if (!irq && id == 1 && qwc == 0 && q[2] == NATIVE_SHRUB_DECMARK) { native_terrain_flush(); native_shrub_dec_push((int)q[3]); t += 16; continue; }
             if (!irq && (id == 1 || id == 3)) {
                 if (native_terrain_tag(q, tte != 0)) { t = id == 3 ? t + 16 : t + 16 + qwc * 16; continue; }
             } else native_terrain_flush();
@@ -174,12 +198,12 @@ s32 uyafn_12D938(void *chan, void *tag)
         static long long stop_after = -2;
         if (stop_after == -2) { const char *e = getenv("UYA_FRAMES"); stop_after = e ? atoll(e) : -1; }
         uya_gfx_frame_stats();
-        if (nsends == 600) uya_gif_stats();
+        if (nsends == 600) { uya_gif_stats(); native_direct_stats(); }
         if (stop_after > 0 && (long long)nsends >= stop_after) {
             void uya_gs_stats(void);
             const char *rd = getenv("UYA_RAMDUMP");   /* testing: save PS2 RAM (0x100000-0x2000000) */
             void vu_stats(void);
-            uya_log("UYA_FRAMES=%lld reached", stop_after); uya_gif_stats(); uya_gs_stats(); vu_stats();
+            uya_log("UYA_FRAMES=%lld reached", stop_after); uya_gif_stats(); native_direct_stats(); uya_gs_stats(); vu_stats();
             if (rd) { FILE *f = fopen(rd, "wb"); if (f) { fwrite((void *)0x100000, 1, 0x1F00000, f); fclose(f); } }
             exit(0);
         }
@@ -281,7 +305,7 @@ typedef union { u64 d[2]; u32 w[4]; } R128h;
 void rc_io_write128(u32 a, const void *v)
 {
     if (a == 0x10005000u) { uya_vif1_data((const u32 *)v, 1); return; }   /* VIF1 FIFO */
-    if (a == 0x10006000u) { extern const char *uya_gs_src; uya_gs_src = "PATH3 (FIFO)"; uya_gs_gif((const u32 *)v, 1); return; }      /* GIF FIFO (PATH3) */
+    if (a == 0x10006000u) { extern const char *uya_gs_src; uya_gs_src = "PATH3 (FIFO)"; native_gif(2, (const u32 *)v, 1); return; }      /* GIF FIFO (PATH3) */
     if (a == 0x10004000u) { uya_vif0_data((const u32 *)v, 1); return; }   /* VIF0 FIFO */
     const u32 *w = v;
     for (int i = 0; i < 4; i++) rc_io_write32(a + 4 * i, w[i]);

@@ -149,6 +149,7 @@ s32 uyafn_12D938(void *chan, void *tag);
 void uyafn_12A950(void);
 void *uyafn_12C078(void);
 void uya_gs_gif(const u32 *d, u32 qwc);
+void native_gif(int path, const u32 *d, u32 qwc);
 
 void func_00121B78(s16 mode, s16 inter, s16 out, s16 ff) { uyafn_12BEE8(mode, inter, out, ff); }  /* sceGsResetGraph */
 void *func_00121D08(void) { return uyafn_12C078(); }                                          /* sceGsGetGParam */
@@ -198,7 +199,7 @@ s32 func_001224B0(void *pkt)
     u32 *q = (u32 *)pkt;
     u32 nloop = q[0] & 0x7FFF;
     { extern const char *uya_gs_src; uya_gs_src = "PATH3 (GS library)"; }
-    uya_gs_gif(q, nloop + 1);
+    native_gif(2, q, nloop + 1);
     return 0;
 }
 

@@ -1,0 +1,9 @@
+# build outputs and captures (captures and generated sources hold game data)
+*.o
+*.bin
+h_*
+ht_*
+*_fuzz
+!*_fuzz.c
+!*_fuzz.sh
+tfrag_check

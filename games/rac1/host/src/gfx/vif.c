@@ -12,8 +12,10 @@
 #include "uya_host.h"
 #include "uya_runtime.h"
 #include "vu.h"
+#include "../native/native_moby.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 void uya_gif_packet(const u32 *data, u32 qwc);
 void vu_mpg(int vu, u32 addr, const u32 *w, u32 ninstr);
@@ -30,7 +32,7 @@ typedef struct {
 static u32 buf0[0x1000], buf1[0x10000 * 4 + 16];
 static Vif vif[2] = { { .id = 0, .cl = 1, .wl = 1, .buf = buf0, .cap = sizeof buf0 / 4 },
                       { .id = 1, .cl = 1, .wl = 1, .buf = buf1, .cap = sizeof buf1 / 4 } };
-static unsigned long long cmd_count[128], frames;
+static unsigned long long cmd_count[128], cmd_words[128], frames;
 
 static const char *cmd_name(u32 c)
 {
@@ -46,6 +48,30 @@ static const char *cmd_name(u32 c)
 
 u32 vu_vif_top(int vu) { return vif[vu & 1].top; }
 u32 vu_vif_itop(int vu) { return vif[vu & 1].itop; }
+
+/* VIF1's state, for the moby runs drawn without the VIF (host/src/native/native_mobyseg.c): read at a
+ * run's start (TOPS, the double buffer, ITOPS; need: a command still waiting for data means the run
+ * goes through the VIF), set at its end to the values the run's left-out codes would have left, known
+ * from MobyProc's templates (no VIF code goes through here). The command still waiting for data
+ * (code, need, got) is not set. uya_vif1_direct_n: testing (the check mode counts the GS-state
+ * blocks against it). */
+unsigned long long uya_vif1_direct_n;
+void uya_vif1_get_state(UyaVifState *s)
+{
+    const Vif *v = &vif[1];
+    s->cl = v->cl; s->wl = v->wl; s->mode = v->mode; s->mask = v->mask;
+    memcpy(s->row, v->row, 16); memcpy(s->col, v->col, 16);
+    s->base = v->base; s->ofst = v->ofst; s->tops = v->tops; s->top = v->top;
+    s->itops = v->itops; s->itop = v->itop; s->dbf = v->dbf; s->mark = v->mark; s->need = v->need;
+}
+void uya_vif1_set_state(const UyaVifState *s)
+{
+    Vif *v = &vif[1];
+    v->cl = s->cl; v->wl = s->wl; v->mode = s->mode; v->mask = s->mask;
+    memcpy(v->row, s->row, 16); memcpy(v->col, s->col, 16);
+    v->base = s->base; v->ofst = s->ofst; v->tops = s->tops; v->top = s->top;
+    v->itops = s->itops; v->itop = s->itop; v->dbf = s->dbf; v->mark = s->mark;
+}
 
 /* vectors of an UNPACK of `num` writes that take data (the rest are filled) */
 static u32 data_vectors(const Vif *v, u32 num)
@@ -185,7 +211,7 @@ void uya_vif1_dump_hist(void)
 static void exec(Vif *v, u32 code, const u32 *d, u32 n)
 {
     u32 cmd = (code >> 24) & 0x7F, imm = code & 0xFFFF, num = (code >> 16) & 0xFF;
-    if (v->id) { cmd_count[cmd]++; hist[hist_n & 63][0] = code; hist[hist_n & 63][1] = v->tops; hist[hist_n & 63][2] = n ? d[0] : 0; hist_n++; }
+    if (v->id) { cmd_count[cmd]++; cmd_words[cmd] += n; hist[hist_n & 63][0] = code; hist[hist_n & 63][1] = v->tops; hist[hist_n & 63][2] = n ? d[0] : 0; hist_n++; }
     if (uya_vif_log) uya_log("    VIF%d %-8s %08X (%u data words)", v->id, cmd_name(cmd), code, n);
     switch (cmd) {
     case 0x00: case 0x06: case 0x10: case 0x11: case 0x13: break;
@@ -203,6 +229,7 @@ static void exec(Vif *v, u32 code, const u32 *d, u32 n)
     case 0x4A: vu_mpg(v->id, imm * 8, d, num ? num : 256); break;
     case 0x50: case 0x51:
         if (v->id) {
+            uya_vif1_direct_n++;
             extern const char *uya_gs_src; uya_gs_src = "PATH2 (VIF1 DIRECT)";
             static int left = -1;      /* testing: UYA_BADTEX=n logs DIRECT packets with a TEX0 whose top half looks like a pointer */
             if (left < 0) { const char *e = getenv("UYA_BADTEXV"); left = e ? atoi(e) : 0; }
@@ -214,7 +241,7 @@ static void exec(Vif *v, u32 code, const u32 *d, u32 n)
                         for (u32 j = 0; j < n && j < 64; j += 4) uya_log("   %08X: %08X %08X %08X %08X", (u32)(uintptr_t)(d + j), d[j], d[j + 1], d[j + 2], d[j + 3]);
                         break;
                     }
-            uya_gif_packet(d, n / 4);
+            { void native_gif(int path, const u32 *d, u32 qwc); native_gif(1, d, n / 4); }
         }
         else bad_cmd(v, code);
         break;
@@ -271,6 +298,20 @@ void uya_vif1_data(const u32 *w, u32 qwc) { feed(&vif[1], w, qwc * 4); }
 void uya_gfx_frame_stats(void)
 {
     frames++;
+    {   /* testing: UYA_VIFSTATS=a,b: VIF1 commands (with their data words) and VU programs from vsync a to b */
+        static long a = -2, b; static int st; static unsigned long long f0; void vu_stats(void); void vu_stats_reset(void);
+        if (a == -2) { const char *e = getenv("UYA_VIFSTATS"); a = -1; if (e) sscanf(e, "%ld,%ld", &a, &b); }
+        long v = (long)uya_frame_count();
+        if (a >= 0 && st == 0 && v >= a) { st = 1; f0 = frames; memset(cmd_count, 0, sizeof cmd_count); memset(cmd_words, 0, sizeof cmd_words); vu_stats_reset(); }
+        if (st == 1 && v >= b) {
+            st = 2;
+            double n = (double)(frames - f0); if (n < 1) n = 1;
+            uya_log("VIF1 commands from vsync %ld to %ld (%.0f sends): count, data words, per send:", a, b, n);
+            for (int c = 0; c < 128; c++)
+                if (cmd_count[c]) uya_log("  %-8s %02X %10.1f %12.1f", cmd_name(c), c, (double)cmd_count[c] / n, (double)cmd_words[c] / n);
+            vu_stats();
+        }
+    }
     if (frames == 3 || frames == 600 || frames == 3000) {
         void vu_stats(void);
         uya_log("VIF1 command counts after %llu sends:", frames);

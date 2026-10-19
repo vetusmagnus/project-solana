@@ -6,6 +6,7 @@
 #include <stdlib.h>
 
 void uya_gs_gif(const u32 *d, u32 qwc);
+void native_gif(int path, const u32 *d, u32 qwc);
 
 typedef struct { s16 inter, omode, ffmode, version; } GParam;
 
@@ -121,8 +122,8 @@ static const u32 *ps2_ptr(const void *p)
 s32 uyafn_12CCC8(u64 *lp, void *src)
 {
     { extern const char *uya_gs_src; uya_gs_src = "PATH3 (GS library)"; }
-    uya_gs_gif(ps2_ptr(lp), 6);
-    uya_gs_gif(ps2_ptr(src), (u32)(lp[10] & 0x7FFF));
+    native_gif(2, ps2_ptr(lp), 6);
+    native_gif(2, ps2_ptr(src), (u32)(lp[10] & 0x7FFF));
     return 0;
 }
 

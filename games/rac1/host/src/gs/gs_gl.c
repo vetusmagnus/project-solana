@@ -672,6 +672,8 @@ static pcmd_t bs;
 static int in_flush;
 void gsgl_flush(void);
 static int rec_tci[REC_MAX][7], rec_mxl[REC_MAX];
+static float rec_q[REC_MAX][2];   /* each texture record's Q range (its own primitives': the levels it can read) */
+static int cur_rec;                       /* the texture record of the primitives being added */
 /* texture cache slots the open batch refers to (gs.c does not reuse them until it is drawn:
  * a slot taken by another texture made the batch decode the old one again at flush time,
  * with whatever palette was loaded by then: textures in the wrong colours for a frame) */
@@ -859,7 +861,6 @@ void gsgl_cpu_write_rect(u32 psm, u32 bp, u32 bw, u32 x, u32 y, u32 w, u32 h)
  * so Z interpolates to the unit even near 2^24 and 2^32 */
 typedef struct { float x, y, U, V, Q, dz; u32 zr; u8 r, g, b, a; u8 f, div, p0, p1; } gv_t;
 static u32 zref;
-static int cur_rec;                       /* the texture record of the primitives being added */
 static int seg_v[4096], nseg;             /* where each run of one record's primitives starts (vertex index) */
 static float seg_bb[4096][4];             /* each run's bounding box */
 static pcmd_t rec_st[REC_MAX];           /* the states of records 1.. (record 0 is the batch's own) */
@@ -898,6 +899,9 @@ static inline void qb(float q)
 {
     if (q < bqmin) bqmin = q;
     if (q > bqmax) bqmax = q;
+    float *r = rec_q[cur_rec];
+    if (q < r[0]) r[0] = q;
+    if (q > r[1]) r[1] = q;
 }
 
 /* S differs from the batch's state only in its texture (and neither reads a
@@ -952,6 +956,7 @@ void gsgl_prim(const pcmd_t *S, u32 sti, const pprim_t *pr)
             rec_mxl[nrec] = S->mxl;
             if (S->defer) clut_snap(nrec);
             for (int l = 0; l < 7; l++) rec_tci[nrec][l] = S->lv[l].tci;
+            rec_q[nrec][0] = 1e30f; rec_q[nrec][1] = -1e30f;
             pin_levels(S);
             cur_rec = nrec++;
         } 
@@ -969,6 +974,7 @@ void gsgl_prim(const pcmd_t *S, u32 sti, const pprim_t *pr)
         pin_levels(S);
         if (S->tme && S->defer && !S->rt) { clut_snap(0); b_clut_saved = 1; }
         bx0 = by0 = bu0 = bv0 = bqmin = 1e30f; bx1 = by1 = bu1 = bv1 = bqmax = -1e30f;
+        rec_q[0][0] = 1e30f; rec_q[0][1] = -1e30f;
     }
     st.prims++;
     const vtx_t *v = pr->v;
@@ -1036,7 +1042,7 @@ void gsgl_prim(const pcmd_t *S, u32 sti, const pprim_t *pr)
         if (n > 4096) n = 4096;
         zref = bs.zpsm == 0x31 ? (b->z & 0xFFFFFF) : b->z;
         for (int i = 0; i < n; i++) {
-            if (nv + 1 > vcap) { gsgl_flush(); bs = *S; b_st = sti; b_mode = mode; b_on = 1; nv = 0; pin_levels(S); }
+            if (nv + 1 > vcap) { gsgl_flush(); bs = *S; b_st = sti; b_mode = mode; b_on = 1; nv = 0; pin_levels(S); rec_q[cur_rec][0] = 1e-30f; rec_q[cur_rec][1] = 1e30f; }
             float t = (float)i / n;
             vtx_t c = *a;
             c.r = (u8)(a->r + (b->r - a->r) * t); c.g = (u8)(a->g + (b->g - a->g) * t); c.b = (u8)(a->b + (b->b - a->b) * t); c.a = (u8)(a->a + (b->a - a->a) * t);
@@ -1056,17 +1062,32 @@ void gsgl_prim(const pcmd_t *S, u32 sti, const pprim_t *pr)
     }
 }
 
-/* the mip levels the batch's LOD range can use */
-static void lod_levels(const pcmd_t *p, int *lmin, int *lmax)
+static int in_mesh_draw;
+/* testing: UYA_NTEXWHY=1 with UYA_NTEXWHY_FROM=v: the first late decodes of a level whose TBP is 0, from vsync v */
+static void why_late(const pcmd_t *p, int r, int l, int lmin, int lmax)
+{
+    static int on = -1, left = 40; static unsigned from;
+    if (on < 0) { const char *e = getenv("UYA_NTEXWHY"); on = e && atoi(e); e = getenv("UYA_NTEXWHY_FROM"); from = e ? (unsigned)atoi(e) : 0; }
+    if (!on || left <= 0) return;
+    extern unsigned uya_frame_count(void);
+    if (uya_frame_count() < from) return;
+    u32 tbp = l == 0 ? (u32)(p->tex0 & 0x3FFF) : (u32)((p->miptbp1 >> ((l - 1) * 20)) & 0x3FFF);
+    if (tbp) return;
+    left--;
+    uya_log("NTEXWHY GL: TBP 0 level %d (record %d%s): Q %g..%g, levels %d..%d, MMIN %d MXL %d L %d K %g LCM %d FST %d", l, r, in_mesh_draw ? ", mesh draw" : "",
+            rec_q[r][0], rec_q[r][1], lmin, lmax, p->mmin, p->mxl, p->l, p->k, p->lcm, p->fst);
+}
+/* the mip levels texture record r's LOD range can use (its primitives' Q range) */
+static void lod_levels(const pcmd_t *p, int r, int *lmin, int *lmax)
 {
     int mxl = p->mxl;
     *lmin = 0; *lmax = 0;
     if (p->mmin < 2 || mxl == 0) return;
-    float lo, hi;
-    if (p->lcm || p->fst || bqmax < bqmin) lo = hi = p->k;
+    float lo, hi, q0 = rec_q[r][0], q1 = rec_q[r][1];
+    if (p->lcm || p->fst || q1 < q0) lo = hi = p->k;
     else {
-        float a = fabsf(bqmin), b = fabsf(bqmax);
-        float qa = (bqmin <= 0 && bqmax >= 0) ? 0 : (a < b ? a : b), qb_ = a > b ? a : b;
+        float a = fabsf(q0), b = fabsf(q1);
+        float qa = (q0 <= 0 && q1 >= 0) ? 0 : (a < b ? a : b), qb_ = a > b ? a : b;
         float s = (float)(1 << p->l);
         lo = qb_ > 0 ? -log2f(qb_) * s + p->k : 1e9f;
         hi = qa > 0 ? -log2f(qa) * s + p->k : 1e9f;
@@ -1226,12 +1247,13 @@ static int flush_setup(pcmd_t *p, flush_t *fx)
         if (rt == ct) { copy_rect(ct->tex, 0, u0 < 0 ? 0 : u0, v0 < 0 ? 0 : v0, u1 >= ct->w ? ct->w - 1 : u1, v1 >= TGH ? TGH - 1 : v1); rtex = tmp_tex[0]; }
         else rtex = rt->tex;
     } else if (p->tme) {
-        lod_levels(p, &lmin, &lmax);
+        lod_levels(p, 0, &lmin, &lmax);
         if (b_clut_saved) gs_clut_swap(rec_clut[0], &rec_cluth[0]);   /* the batch's palette */
         for (int l = 0; l <= p->mxl && l < 7; l++) {
             int need = l >= lmin && l <= lmax;
             if ((p->defer & (1 << l)) || tcser[lv[l].tci] != lv[l].ser) {
                 if (!need) continue;
+                why_late(p, 0, l, lmin, lmax);
                 no_dl = !strict;
                 if (gs_tex_late(p, l, &lv[l])) { gsgl_tex_touch(&lv[l]); st.late++; }
                 no_dl = 0;
@@ -1266,10 +1288,11 @@ static int flush_setup(pcmd_t *p, flush_t *fx)
         if (r) {
             memcpy(rl, q->lv, sizeof rl);
             int qmin = 0, qmax = 7;
-            if (q->defer) { lod_levels(q, &qmin, &qmax); gs_clut_swap(rec_clut[r], &rec_cluth[r]); }
+            if (q->defer) { lod_levels(q, r, &qmin, &qmax); gs_clut_swap(rec_clut[r], &rec_cluth[r]); }
             for (int l = 0; l <= q->mxl && l < 7; l++) {
                 if (q->defer & (1 << l)) {   /* decoded late: only the levels the batch's LOD range needs */
                     if (l < qmin || l > qmax) continue;
+                    why_late(q, r, l, qmin, qmax);
                     no_dl = !strict;
                     if (gs_tex_late(q, l, &rl[l])) { gsgl_tex_touch(&rl[l]); st.late++; }
                     no_dl = 0;
@@ -1484,8 +1507,15 @@ done:
  * indices; drawn with nvs_src's transform into the same targets as everything else, through
  * the same pixel stage, with the state of a pcmd_t (the game's material as GS state). */
 #define NMESH 32768
-static struct { GLuint vao, vb, cb, ib; int nv, ni, used; } nmesh[NMESH];
+static struct { GLuint vao, vb, cb, ib; int nv, ni, used; float bb[8]; } nmesh[NMESH];   /* bb: x y z w ranges of its vertices */
 static int nmesh_free = -1;
+static void mesh_bbox(int id, const float *v6, int nv)
+{
+    float *b = nmesh[id].bb;
+    for (int k = 0; k < 4; k++) { b[2 * k] = 1e30f; b[2 * k + 1] = -1e30f; }
+    for (int i = 0; i < nv; i++)
+        for (int k = 0; k < 4; k++) { float x = v6[i * 6 + k]; if (x < b[2 * k]) b[2 * k] = x; if (x > b[2 * k + 1]) b[2 * k + 1] = x; }
+}
 int gsgl_mesh_create(const float *v6, const u8 *rgba, int nv, const u32 *idx, int ni)
 {
     if (!prog_n || nv <= 0 || ni <= 0) return -1;
@@ -1496,6 +1526,7 @@ int gsgl_mesh_create(const float *v6, const u8 *rgba, int nv, const u32 *idx, in
     nmesh_free = (id + 1) % NMESH;   /* (the next search starts after it) */
     gsgl_flush();
     nmesh[id].used = 1; nmesh[id].nv = nv; nmesh[id].ni = ni;
+    mesh_bbox(id, v6, nv);
     if (!nmesh[id].vao) {
         p_glGenVertexArrays(1, &nmesh[id].vao);
         p_glGenBuffers(1, &nmesh[id].vb); p_glGenBuffers(1, &nmesh[id].cb); p_glGenBuffers(1, &nmesh[id].ib);
@@ -1517,7 +1548,7 @@ void gsgl_mesh_update(int id, const float *v6, const u8 *rgba)
 {
     if (id < 0 || id >= NMESH || !nmesh[id].used) return;
     gsgl_flush();
-    if (v6) { p_glBindBuffer(GL_ARRAY_BUFFER, nmesh[id].vb); p_glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)nmesh[id].nv * 24, v6); }
+    if (v6) { p_glBindBuffer(GL_ARRAY_BUFFER, nmesh[id].vb); p_glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)nmesh[id].nv * 24, v6); mesh_bbox(id, v6, nmesh[id].nv); }
     p_glBindBuffer(GL_ARRAY_BUFFER, nmesh[id].cb);
     p_glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)nmesh[id].nv * 4, rgba);
 }
@@ -1552,10 +1583,29 @@ void gsgl_mesh_draw(const pcmd_t *S, u32 sti, int id, int first, int count, cons
     bx0 = (float)S->sx0; by0 = (float)S->sy0; bx1 = (float)S->sx1; by1 = (float)S->sy1;
     bu0 = bv0 = 1e30f; bu1 = bv1 = -1e30f;
     bqmin = 1e-30f; bqmax = 1e30f;       /* (Q anywhere: every mip level the texture has) */
+    {   /* the draw's Q range, for the mip levels it can read: Q = k / w, w linear in the vertex
+         * (x y z and its weight), so every pixel's w (the GPU cuts at the near plane, between
+         * vertices) lies between the extremes of w over the mesh's box; anywhere if w can be 0 */
+        const float *b = nmesh[id].bb, cw[4] = { xf[3], xf[7], xf[11], xf[15] };
+        float lo = 0, hi = 0;
+        for (int k = 0; k < 4; k++) { float a = cw[k] * b[2 * k], c = cw[k] * b[2 * k + 1]; lo += a < c ? a : c; hi += a > c ? a : c; }
+        float kq = fabsf(xf[16]);
+        if (hi < 0) { float t = -lo; lo = -hi; hi = t; }   /* (w all negative: Q's size is what counts) */
+        if (lo > 0 && hi >= lo && b[0] <= b[1] && kq > 0) { bqmin = kq / hi; bqmax = kq / lo; }
+        {   /* testing: UYA_NTEXWHY: a few meshes' w ranges */
+            static int left = -1; if (left < 0) left = getenv("UYA_NTEXWHY") ? 12 : 0;
+            extern unsigned uya_frame_count(void);
+            if (left > 0 && uya_frame_count() > 1400) { left--; uya_log("NTEXWHY GL: mesh %d w %g..%g k %g box x %g..%g y %g..%g z %g..%g a %g..%g", id, lo, hi, xf[16], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]); }
+        }
+    }
+    rec_q[0][0] = bqmin; rec_q[0][1] = bqmax;
     pin_levels(S);
     if (S->tme && S->defer && !S->rt) { clut_snap(0); b_clut_saved = 1; }
     flush_t fx;
-    if (!flush_setup(&bs, &fx)) { gsgl_batch_id++; return; }
+    in_mesh_draw = 1;
+    int fok = flush_setup(&bs, &fx);
+    in_mesh_draw = 0;
+    if (!fok) { gsgl_batch_id++; return; }
     if (gc.prog != prog_n) { p_glUseProgram(prog_n); gc.prog = prog_n; }
     p_glBindVertexArray(nmesh[id].vao);
     /* (the program's uniforms keep their values: only those that changed since the last mesh draw are sent) */

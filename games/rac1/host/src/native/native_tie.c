@@ -11,6 +11,7 @@
  * against the program itself by dev/vu_harness on every tie run of whole frames: identical
  * but for the unused fourth word of ST), and the caller sends it on. */
 #include "native_tie.h"
+#include <stdint.h>
 #include <string.h>
 static void tm_class(void);
 
@@ -101,13 +102,13 @@ u32 native_tie_state(u8 *mem, u32 top, u32 *out)
     return 2;
 }
 
-u32 native_tie_draw(const u8 *mem, u32 top, u32 *out)
+/* an instance of class c: its 6 rows, its class's colour indexes (iw, one per word), its colours
+ * (cmem's qwords 838..) */
+static u32 draw_rows(const TieClass *c, const u32 *rows, const u32 *idx, const u8 *mem, u32 *out)
 {
-    TieClass *c = &cls;
     if (!c->valid) return 0;
     float R[6][4];
-    for (int k = 0; k < 6; k++) memcpy(R[k], Q(mem, 0xC6 + top + k), 16);
-    const u32 *idx = Q(mem, 0xCC + top);            /* the class's color indexes, one per word */
+    for (int k = 0; k < 6; k++) memcpy(R[k], rows + 4 * k, 16);
     u32 n = 0;
     for (int a = 0; a < c->nad; a++) {               /* texture blocks */
         u32 d = c->ad_dest[a] & 0x3FF;
@@ -142,7 +143,7 @@ u32 native_tie_draw(const u8 *mem, u32 top, u32 *out)
         s32 xyz[3]; float q;
         transform(R, x, y, z, xyz, &q);
         float st[3] = { fc(itof12(v->st[0]) * q), fc(itof12(v->st[1]) * q), fc(itof12(v->st[2]) * q) };
-        const u32 *iq = Q(mem, 0xCC + top + fq + j);
+        const u32 *iq = idx + 4 * (fq + j);
         const float *c0 = (const float *)Q(mem, 838 + iq[0]), *c1 = (const float *)Q(mem, 838 + iq[1]), *c2 = (const float *)Q(mem, 838 + iq[2]);
         u32 col[4];
         for (int k = 0; k < 4; k++) {   /* c0 weighted by row4.z, the mean of c1 and c2 by row4.w */
@@ -154,6 +155,10 @@ u32 native_tie_draw(const u8 *mem, u32 top, u32 *out)
         if (v->st[3] && v->st[3] != v->a[3]) put_vertex(out, &n, v->st[3], st, col, xyz, fog);
     }
     return n;
+}
+u32 native_tie_draw(const u8 *mem, u32 top, u32 *out)
+{
+    return draw_rows(&cls, Q(mem, 0xC6 + top), Q(mem, 0xCC + top), mem, out);
 }
 
 /* ---- ties as native meshes ----
@@ -197,8 +202,10 @@ static u32 make_key(const TieClass *c)
     memcpy(tkey + n, c->tag_ad, 16); n += 4; memcpy(tkey + n, c->tag_strip, 16); n += 4;
     return n;
 }
+static int tm_dropped;   /* (the direct packets' slots name meshes: read again) */
 static void tm_drop(void)
 {
+    tm_dropped = 1;
     for (u32 i = 0; i < ntm; i++) { if (tm[i].ok) native_mesh_free(TM_ID0 + i); free(tm[i].key); free(tm[i].v6); free(tm[i].rgba); free(tm[i].r); }
     ntm = 0; memset(th_k, 0, sizeof th_k);
 }
@@ -302,18 +309,18 @@ static void tm_class(void)
     tm_cur = (int)ntm++;
 }
 
-/* an instance at VU memory inst (rows 0..5, colour indexes at inst + 6) of class c (mesh mi);
- * sc, of: the screen scale and offset after the projection (clip: 0 none; 1 the frustum) */
-static int tm_draw(TieClass *c, int mi, const u8 *mem, u32 inst, const float sc[3], const float of[3], int clip)
+/* an instance of class c (mesh mi): its rows 0..5, its class's colour indexes (idx), its colours
+ * (mem's qwords 838..); sc, of: the screen scale and offset after the projection (clip: 0 none;
+ * 1 the frustum) */
+static int tm_draw(const TieClass *c, int mi, const u32 *rows, const u32 *idx, const u8 *mem, const float sc[3], const float of[3], int clip)
 {
     if (mi < 0 || !tm[mi].ok) { tm_n_pk++; return 0; }
     TieMesh *m = &tm[mi]; int tm_cur = mi;
     float R[6][4];
-    for (int k = 0; k < 6; k++) memcpy(R[k], Q(mem, inst + k), 16);
+    for (int k = 0; k < 6; k++) memcpy(R[k], rows + 4 * k, 16);
     s32 fog = ftoi4(R[5][3]);
     if (fog & 0x8000) { if (clip) { static int t; if (t++ < 3) uya_log("native tie clip meshes: fog %08X", (u32)fog); } if (++tm_n_pk % 10000 == 1) uya_log("native tie meshes: an instance as a packet (fog %08X)", (u32)fog); return 0; }      /* (the ADC bit: the packet's vertices would not draw) */
     static float v6[384 * 6]; static u8 rgba[384 * 4];
-    const u32 *idx = Q(mem, inst + 6);
     for (int j = 0; j < c->ndinky; j++) { const u32 *col = Q(mem, 838 + idx[j]); for (int k = 0; k < 4; k++) rgba[j * 4 + k] = (u8)col[k]; }
     u32 fq = (c->ndinky + 3) / 4;
     int moved = 0;
@@ -324,7 +331,7 @@ static int tm_draw(TieClass *c, int mi, const u8 *mem, u32 inst, const float sc[
         o[0] = fc(fc((float)v->a[0] * R[4][0]) + (float)v->b[0]);
         o[1] = fc(fc((float)v->a[1] * R[4][0]) + (float)v->b[1]);
         o[2] = fc(fc((float)v->a[2] * R[4][0]) + (float)v->b[2]);
-        const u32 *iq = Q(mem, inst + 6 + fq + j);
+        const u32 *iq = idx + 4 * (fq + j);
         const float *c0 = (const float *)Q(mem, 838 + iq[0]), *c1 = (const float *)Q(mem, 838 + iq[1]), *c2 = (const float *)Q(mem, 838 + iq[2]);
         for (int k = 0; k < 4; k++) {
             float mm = fc(fc(c2[k] * 0.5f) + fc(c1[k] * 0.5f));
@@ -359,7 +366,7 @@ static int tm_draw(TieClass *c, int mi, const u8 *mem, u32 inst, const float sc[
 int native_tie_mesh(const u8 *mem, u32 top)
 {
     static const float one[3] = { 1, 1, 1 }, zero[3] = { 0, 0, 0 };
-    return tm_draw(&cls, tm_cur, mem, 0xC6 + top, one, zero, 0);
+    return tm_draw(&cls, tm_cur, Q(mem, 0xC6 + top), Q(mem, 0xCC + top), mem, one, zero, 0);
 }
 
 /* the tie clip program (224979): its class packets are the main program's; decoded here before
@@ -378,5 +385,200 @@ int native_tie_clip_mesh(const u8 *mem, u32 inst)
     if (!ccls.valid || tm_clip_cur < 0 || !tm[tm_clip_cur].ok) { static int t; if (t++ < 3) uya_log("native tie clip meshes: no class mesh (valid %d, mesh %d)", ccls.valid, tm_clip_cur); return 0; }
     float sc[4], of[4];
     memcpy(sc, Q(mem, 974), 16); memcpy(of, Q(mem, 973), 16);
-    return tm_draw(&ccls, tm_clip_cur, mem, inst, sc, of, 1);
+    return tm_draw(&ccls, tm_clip_cur, Q(mem, inst), Q(mem, inst + 6), mem, sc, of, 1);
+}
+
+/* ---- ties straight from the native TieProc (native_tieproc.c) ----
+ * TieProc decides per packet (one level of detail of a class): when the packet has a mesh, its
+ * draws (the packet's texture blocks, its instances) go here, as records, in place of their REFs
+ * and MSCALs in the chain; a marker in the chain (a CNT of 0 qwords: NOP codes, MARK, id) names
+ * the run of records, drawn where the chain walker (host/src/sdk/dma.c) meets it: the chain's
+ * order and its one-frame lag. A packet's class is read from the level data once, in the layout
+ * the chain's REFs give it in VU memory (TieProc checks their templates first): its header, its
+ * texture blocks, its strip header, its vertices, its colour indexes (the list for the first VU
+ * buffer; its colours then sit at 838). An instance's rows are its block in the chain (TieProc
+ * wrote them), its colours its colour table (the instance matrix + 0x40, as the game leaves it,
+ * the chain's ROW added); the texture blocks are read again at each draw (the game patches them). */
+#define EE(a) ((const u8 *)(uintptr_t)(a))
+static u32 rd32(u32 a) { u32 v; memcpy(&v, EE(a), 4); return v; }
+static u8 rd8(u32 a) { return *EE(a); }
+static u32 dk966[36], drow[4], dsig = ~0u;
+typedef struct { u32 p; TieClass c; int mesh; u32 iw[1024]; } DSlot;
+#define DN 4096
+#define DH 8192
+static DSlot *ds[DN]; static u32 nds;
+static u32 dh_k[DH]; static int dh_v[DH];
+static unsigned long long d_class, d_noclass, d_inst, d_inst_pk, d_clip;
+
+void native_tie_direct_frame(u32 sig, const u32 k966[36], const u32 row[4])
+{
+    memcpy(dk966, k966, sizeof dk966); memcpy(drow, row, sizeof drow);
+    if (sig == dsig && !tm_dropped) return;
+    tm_dropped = 0;
+    for (u32 i = 0; i < nds; i++) free(ds[i]);
+    nds = 0; memset(dh_k, 0, sizeof dh_k);
+    dsig = sig;
+}
+
+/* the VIF's unpacks of the level data into VU memory, for the formats the templates name */
+static u8 dimg[1024 * 16];
+static u32 *IW(u32 q) { return (u32 *)(dimg + (q & 0x3FF) * 16); }
+static void un32(u32 q, u32 src, u32 n) { for (u32 i = 0; i < n; i++) memcpy(IW(q + i), EE(src + 16 * i), 16); }
+static void un8(u32 q, u32 src, u32 n) { for (u32 i = 0; i < n; i++) for (int j = 0; j < 4; j++) IW(q + i)[j] = rd8(src + 4 * i + (u32)j); }
+static void un16(u32 q, u32 src, u32 n) { for (u32 i = 0; i < n; i++) for (int j = 0; j < 4; j++) { s16 h; memcpy(&h, EE(src + 8 * i + 2 * (u32)j), 2); IW(q + i)[j] = (u32)(s32)h; } }
+static void un8s(u32 q, u32 src, u32 n) { for (u32 i = 0; i < n; i++) for (int j = 0; j < 4; j++) IW(q + i)[j] = (u32)(s32)(s8)rd8(src + 4 * i + (u32)j); }
+
+/* the clip list's part (the clip program's chain, 224979): its constants (VU 966..975), and
+ * whether its instances can be drawn here at all (the GPU renderer cuts them at the frustum, as
+ * native_tie_clip_mesh does; UYA_NCLIPMESH=0: the program) */
+static u32 dk966c[40];
+int native_tie_direct_clip_frame(const u32 k966[40])
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("UYA_NCLIPMESH"); on = !(e && !atoi(e)); }
+    if (!on || !uya_gs_renderer_gl()) return 0;
+    memcpy(dk966c, k966, sizeof dk966c);
+    return 1;
+}
+/* 1 if an instance of the clip part, with these rows, draws as its mesh (tm_draw's tests) */
+int native_tie_direct_clip_inst(const u32 *rows)
+{
+    float w; memcpy(&w, rows + 23, 4);
+    float sz; memcpy(&sz, dk966c + (974 - 966) * 4 + 2, 4);
+    return !(ftoi4(w) & 0x8000) && sz != 0.0f;
+}
+
+/* clip: the clip part's packet (one more unpack, the clip program's own, and its constants) */
+static int direct_class(u32 p, u32 base, int clip)
+{
+    if (tm_on < 0) { const char *e = getenv("UYA_NTIEMESH"), *n = getenv("UYA_NATIVE"); tm_on = !(e && !atoi(e)) && !(n && !atoi(n)); }
+    if (!tm_on) return -1;
+    u32 key = p | (u32)clip;
+    u32 h = (key * 2654435761u) >> 19;
+    while (dh_k[h]) { if (dh_k[h] == key) return ds[dh_v[h]]->mesh >= 0 ? dh_v[h] : -1; h = (h + 1) & (DH - 1); }
+    if (nds == DN) return -1;
+    DSlot *s = malloc(sizeof *s);
+    if (!s) return -1;
+    u32 a3 = rd32(p), nad = rd8(p + 4), v0 = rd8(p + 0xB);
+    memset(dimg, 0, sizeof dimg);
+    un32(0, a3, 1);
+    for (u32 a = 0; a < nad; a++) un32(1 + 5 * a, rd32(a3 + 0x10 + 4 * a) + base, 5);
+    un8(1 + 5 * nad, a3 + 0x20, rd8(p + 7) * 4u);
+    if (clip) un8s(0x1E, a3 + rd8(p + 0xC) * 16u, rd8(p + 0xD) * 4u);
+    un16(50, a3 + rd8(p + 8) * 16u, rd8(p + 9) * 2u);
+    un8(0xCC, a3 + rd8(p + 0xA) * 16u, v0);
+    if (clip) memcpy(dimg + 966 * 16, dk966c, sizeof dk966c);
+    else memcpy(dimg + 966 * 16, dk966, sizeof dk966);
+    static TieClass keep; int keep_cur = tm_cur;
+    keep = cls;
+    native_tie_setup(dimg);
+    s->p = p; s->c = cls;
+    s->mesh = cls.valid && (u32)cls.nad == nad && tm_cur >= 0 && tm[tm_cur].ok ? tm_cur : -1;
+    cls = keep; tm_cur = keep_cur;
+    /* the colour indexes it reads: within the list, each one of the instance's 64 colours */
+    u32 nw = 4 * v0, fq = (s->c.ndinky + 3) / 4;
+    memcpy(s->iw, IW(0xCC), nw * 4);
+    for (int j = 0; j < s->c.ndinky && s->mesh >= 0; j++) if ((u32)j >= nw || s->iw[j] >= 64) s->mesh = -1;
+    for (int j = 0; j < s->c.nfat && s->mesh >= 0; j++)
+        for (u32 k = 0; k < 3; k++) { u32 w = 4 * (fq + (u32)j) + k; if (w >= nw || s->iw[w] >= 64) s->mesh = -1; }
+    if (s->mesh >= 0) d_class++;
+    else { d_noclass++; static int told; if (told++ < 8) uya_log("native tie direct: %spacket %08X stays in the chain (%s)", clip ? "clip part " : "", p, !cls.valid ? "no class" : "no mesh, or its colour indexes"); }
+    ds[nds] = s; dh_k[h] = key; dh_v[h] = (int)nds;
+    return s->mesh >= 0 ? (int)nds++ : (nds++, -1);
+}
+int native_tie_direct_class(u32 p, u32 base) { return direct_class(p, base, 0); }
+int native_tie_direct_clip_class(u32 p, u32 base) { return direct_class(p, base, 1); }
+
+/* segments: runs of records (a packet: slot | 1 << 31, its data, the class's base; an instance:
+ * 0, its block, its matrix) */
+#define DSEG 4096
+#define DREC (1 << 17)
+static struct { u32 first, count; } dseg[DSEG];
+static u32 drec[DREC][3], dseg_next, drec_next, dseg_cur;
+u32 native_tie_seg_begin(void)
+{
+    u32 id = dseg_next++ % DSEG;
+    dseg[id].first = drec_next; dseg[id].count = 0; dseg_cur = id;
+    return id;
+}
+static void rec3(u32 a, u32 b, u32 c) { u32 *r = drec[drec_next++ % DREC]; r[0] = a; r[1] = b; r[2] = c; dseg[dseg_cur].count++; }
+void native_tie_seg_packet(int slot, u32 a3, u32 base) { rec3((u32)slot | 0x80000000u, a3, base); }
+void native_tie_seg_clip_packet(int slot, u32 a3, u32 base) { rec3((u32)slot | 0xC0000000u, a3, base); }
+void native_tie_seg_inst(u32 blk, u32 mtx) { rec3(0, blk, mtx); }
+
+/* the alpha test switch (native_tie_state's), the instance's mode given; the last mode is VU
+ * memory's, which the chain's own tie draws share */
+static u32 state_of(u32 mode, u32 *out)
+{
+    u8 *mem = (u8 *)(uintptr_t)0x1100C000u;
+    u32 *st = (u32 *)(mem + 971 * 16);
+    st[0] = (st[0] & 0xFFFF0000u) | mode;
+    if ((st[1] & 0xFFFF) == mode) return 0;
+    memcpy(out, Q(mem, 972), 16);
+    memcpy(out + 4, Q(mem, mode ? 974 : 973), 16);
+    st[1] = (st[1] & 0xFFFF0000u) | mode;
+    return 2;
+}
+static void seg_draw(u32 id)
+{
+    static const float one[3] = { 1, 1, 1 }, zero[3] = { 0, 0, 0 };
+    static u32 dcol[1024 * 4], buf[0x400 * 4];
+    extern const char *uya_gs_src;
+    id %= DSEG;
+    DSlot *s = 0;
+    int clip = 0;
+    unsigned long long n0 = d_inst;
+    for (u32 k = 0; k < dseg[id].count; k++) {
+        const u32 *r = drec[(dseg[id].first + k) % DREC];
+        if (r[0] >> 31) {
+            u32 slot = r[0] & 0x3FFFFFFFu;
+            clip = (r[0] >> 30) & 1;
+            s = slot < nds ? ds[slot] : 0;
+            if (s) for (int a = 0; a < s->c.nad; a++) for (u32 j = 0; j < 5; j++) memcpy(s->c.ad[a][j], EE(rd32(r[1] + 0x10 + 4 * (u32)a) + r[2] + 16 * j), 16);
+            if (s && clip) {
+                /* the clip program's start for a class kicks VU 969 (a GIF tag, the packet empty) */
+                u32 q = 969 - 966, n = 0;
+                while (q < 10 && n < 10) {
+                    const u32 *t = dk966c + 4 * q;
+                    u64 lo = ((u64)t[1] << 32) | t[0];
+                    u32 nloop = lo & 0x7FFF, eop = (lo >> 15) & 1, flg = (lo >> 58) & 3, nreg = (lo >> 60) & 15;
+                    if (!nreg) nreg = 16;
+                    u32 len = 1 + (flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop);
+                    for (u32 j = 0; j < len && q + j < 10; j++) memcpy(buf + 4 * n++, dk966c + 4 * (q + j), 16);
+                    q += len;
+                    if (eop) break;
+                }
+                uya_gs_src = "PATH1 native tie clip";
+                native_kick(buf, n);
+            }
+            continue;
+        }
+        if (!s) continue;
+        const u32 *rows = (const u32 *)EE(r[1]);
+        for (u32 i = 0; i < 64; i++) for (u32 j = 0; j < 4; j++) dcol[(838 + i) * 4 + j] = rd8(r[2] + 0x40 + 4 * i + j) + drow[j];
+        if (clip) {
+            float sc[4], of[4];
+            memcpy(sc, dk966c + (974 - 966) * 4, 16); memcpy(of, dk966c + (973 - 966) * 4, 16);
+            d_clip++;
+            if (!tm_draw(&s->c, s->mesh, rows, s->iw, (const u8 *)dcol, sc, of, 1)) { static int told; if (told++ < 5) uya_log("native tie direct: a clip instance did not draw"); }
+            continue;
+        }
+        u32 ns = state_of(rows[20] & 0xFFFF, buf);
+        if (ns) { uya_gs_src = "PATH1 native tie"; native_kick(buf, ns); }
+        d_inst++;
+        if (tm_draw(&s->c, s->mesh, rows, s->iw, (const u8 *)dcol, one, zero, 0)) continue;
+        d_inst_pk++;
+        memset(buf, 0, s->c.size * 16);
+        u32 n = draw_rows(&s->c, rows, s->iw, (const u8 *)dcol, buf);
+        uya_gs_src = "PATH1 native tie";
+        if (n) native_kick(buf, n);
+    }
+    if (d_inst / 100000 != n0 / 100000)
+        uya_log("native tie direct: %llu instances (%llu as packets), %llu of the clip part; packets with a mesh %llu, staying in the chain %llu", d_inst, d_inst_pk, d_clip, d_class, d_noclass);
+}
+int native_tie_tag(const u32 *q)
+{
+    if ((q[0] & 0x7000FFFFu) != 0x10000000u || q[2] != NATIVE_TIE_MARK) return 0;
+    seg_draw(q[3]);
+    return 1;
 }

@@ -202,6 +202,53 @@ static int fx_native(int bit)
     return (on & bit) != 0;
 }
 static void drop_emit(const u32 *pk, u32 qwc) { (void)pk; (void)qwc; }
+/* the shrub clip program (912339) on memory mem: VU1 memory, or (native_shrub.c's direct draws)
+ * the shrub programs' private image of it */
+int uya_shrubclip_run(u8 *mem, u32 pc)
+{
+    /* the registers it carries from run to run are the VU1's (other programs share them) */
+    native_shrubclip_seed((const u32 (*)[4])rc_vu1.vf, rc_vu1.vi);
+    native_src = "PATH1 native shrub clip";
+    /* with the GPU renderer: the instances as their class's mesh, cut by the GPU (the program
+     * still runs: later runs read what it leaves; its packets are not sent) */
+    int as_mesh = 0;
+    if (pc == 0x0088 || pc == 0x00A8) native_shrub_clip_class(mem, (122 - rc_vu1.vi[11]) & 0xFFFF);
+    else if (pc == 0x0318 && clip_meshes()) {
+        float c22[4], c23[4], c29[4], c30[4];
+        memcpy(c22, rc_vu1.vf[22], 16); memcpy(c23, rc_vu1.vf[23], 16); memcpy(c29, rc_vu1.vf[29], 16); memcpy(c30, rc_vu1.vf[30], 16);
+        as_mesh = native_shrub_clip_group(mem, (617 - (((const u32 *)(mem + 16))[1] & 0xFFFF)) & 0xFFFF, c22, c23, c29, c30);
+    }
+    if (pc == 0x0318) clip_count(1, as_mesh);
+    if (native_shrubclip_run(pc, mem, 0, as_mesh ? drop_emit : native_emit) < 0) {
+        static int told; if (!told++) uya_log("native shrub clip: no native code for the program's start 0x%04X (the program runs)", pc);
+        return 0;
+    }
+    native_shrubclip_state((u32 (*)[4])rc_vu1.vf, rc_vu1.vi);
+    return 1;
+}
+/* the moby program (13859) from pc on memory mem with TOP top: from the VIF (native_vu1, below), or
+ * from native_mobyseg.c's direct draws (VU1 memory, the TOP its copy of the VIF state has). 0: no
+ * native code for pc */
+int uya_moby_vu1_run(u8 *mem, u32 pc, u32 top)
+{
+    static int reset;
+    static NativeMobyKicks k;
+    if (!reset++) native_moby_reset();
+    if (native_moby_run(pc, mem, top, &k) < 0) {
+        static int told; if (!told++) uya_log("native mobys: no native code for the program's start 0x%04X (the program runs)", pc);
+        return 0;
+    }
+    extern const char *uya_gs_src;
+    for (u32 i = 0; i < k.npk; i++) { uya_gs_src = "PATH1 native moby"; native_kick(k.d + k.off[i] * 4, k.len[i]); }
+    return 1;
+}
+/* the image VU1 micro memory has for a start at pc is name (native_mobyseg.c, before it runs the moby
+ * program itself) */
+int uya_vu1_image_is(u32 pc, const char *name)
+{
+    int i = find_image(1, pc & (micro_size(1) - 8));
+    return i >= 0 && !strcmp(vu_images[i].name, name);
+}
 static int native_vu1(const char *img, u32 pc)
 {
     static int on = -1;
@@ -215,16 +262,8 @@ static int native_vu1(const char *img, u32 pc)
         return 0;
     }
     if (img[0] == '1' && !strcmp(img, "13859")) {           /* mobys */
-        static int reset;
-        static NativeMobyKicks k;
-        if (!reset++) native_moby_reset();
-        if (native_moby_run(pc, (u8 *)(uintptr_t)0x1100C000u, vu_vif_top(1), &k) < 0) {
-            static int told; if (!told++) uya_log("native mobys: no native code for the program's start 0x%04X (the program runs)", pc);
-            return 0;
-        }
-        extern const char *uya_gs_src;
-        for (u32 i = 0; i < k.npk; i++) { uya_gs_src = "PATH1 native moby"; native_kick(k.d + k.off[i] * 4, k.len[i]); }
-        return 1;
+        native_mobyseg_chk(pc, mem, vu_vif_top(1));         /* (testing, UYA_NMOBYDIRECT=1: what MobyProc's records predict, compared) */
+        return uya_moby_vu1_run((u8 *)(uintptr_t)0x1100C000u, pc, vu_vif_top(1));
     }
     if (img[0] == '2' && !strcmp(img, "224979")) {          /* ties crossing the view frustum (tie clip) */
         static u32 out[0x4000 * 4];
@@ -255,27 +294,7 @@ static int native_vu1(const char *img, u32 pc)
         if (!as_mesh) for (int i = 0; i < n; i++) { uya_gs_src = "PATH1 native tie clip"; native_kick(out + pk[i].off * 4, pk[i].n); }
         return 1;
     }
-    if (img[0] == '9' && !strcmp(img, "912339")) {          /* shrubs crossing the view frustum (shrub clip) */
-        /* the registers it carries from run to run are the VU1's (other programs share them) */
-        native_shrubclip_seed((const u32 (*)[4])rc_vu1.vf, rc_vu1.vi);
-        native_src = "PATH1 native shrub clip";
-        /* with the GPU renderer: the instances as their class's mesh, cut by the GPU (the program
-         * still runs: later runs read what it leaves; its packets are not sent) */
-        int as_mesh = 0;
-        if (pc == 0x0088 || pc == 0x00A8) native_shrub_clip_class(mem, (122 - rc_vu1.vi[11]) & 0xFFFF);
-        else if (pc == 0x0318 && clip_meshes()) {
-            float c22[4], c23[4], c29[4], c30[4];
-            memcpy(c22, rc_vu1.vf[22], 16); memcpy(c23, rc_vu1.vf[23], 16); memcpy(c29, rc_vu1.vf[29], 16); memcpy(c30, rc_vu1.vf[30], 16);
-            as_mesh = native_shrub_clip_group(mem, (617 - (((const u32 *)(mem + 16))[1] & 0xFFFF)) & 0xFFFF, c22, c23, c29, c30);
-        }
-        if (pc == 0x0318) clip_count(1, as_mesh);
-        if (native_shrubclip_run(pc, (u8 *)(uintptr_t)0x1100C000u, vu_vif_top(1), as_mesh ? drop_emit : native_emit) < 0) {
-            static int told; if (!told++) uya_log("native shrub clip: no native code for the program's start 0x%04X (the program runs)", pc);
-            return 0;
-        }
-        native_shrubclip_state((u32 (*)[4])rc_vu1.vf, rc_vu1.vi);
-        return 1;
-    }
+    if (img[0] == '9' && !strcmp(img, "912339")) return uya_shrubclip_run((u8 *)(uintptr_t)0x1100C000u, pc);   /* shrubs crossing the view frustum (shrub clip) */
     if (img[0] == '9' && !strcmp(img, "903379")) {          /* terrain crossing the view frustum (tfrag clip) */
         static u32 out[0x4000 * 4];
         static NativeTfragclipPacket pk[512];
@@ -412,6 +431,16 @@ static void vu_run_(int vu, u32 pc)
         extern unsigned long long uya_gs_time_in(void);
         int st = uya_srcstats_on();
         unsigned long long g0 = st ? uya_gs_time_in() : 0, t0 = st ? __builtin_ia32_rdtsc() : 0;
+        {   /* testing: UYA_STARTLOG=image,n,from: the chain tags before the image's first n starts from the VIF (from vsync `from`) */
+            static int left = -1; static char want[16]; static unsigned from;
+            if (left < 0) { const char *e = getenv("UYA_STARTLOG"); left = 0; if (e) { sscanf(e, "%15[^,],%d,%u", want, &left, &from); } }
+            if (left > 0 && !strcmp(vu_images[i].name, want) && uya_frame_count() >= from) {
+                extern u32 uya_dma_tag_ring[16][5], uya_dma_tag_n;
+                left--;
+                uya_log("STARTLOG: %s from %04X at vsync %u; the last chain tags:", want, pc, uya_frame_count());
+                for (u32 k = 0; k < 16; k++) { const u32 *e = uya_dma_tag_ring[(uya_dma_tag_n + k) & 15]; uya_log("   tag %08X: %08X %08X  %08X %08X", e[0], e[1], e[2], e[3], e[4]); }
+            }
+        }
         if (native_vu1(vu_images[i].name, pc)) {
             if (st) { char key[48]; snprintf(key, sizeof key, "native %s@%04X", vu_images[i].name, pc); uya_srcstat_add(key, __builtin_ia32_rdtsc() - t0 - (uya_gs_time_in() - g0), 0, 0); }
             return;
@@ -517,9 +546,15 @@ static void xgkick_send(u32 qaddr)
         uya_gs_src = src;
     }
     seq_kick(buf, n);
-    uya_gif_packet(buf, n);
+    native_kick(buf, n);
 }
 
+void vu_stats_reset(void)
+{
+    runs[0] = runs[1] = kicks = kick_qw = 0;
+    memset(img_runs, 0, sizeof img_runs);
+    for (int i = 0; i < MAX_IMG; i++) if (pc_runs[i]) memset(pc_runs[i], 0, 0x800 * sizeof(u32));
+}
 void vu_stats(void)
 {
     uya_log("VU microprograms run: VU0 %llu, VU1 %llu; XGKICK %llu (%llu qwords)", runs[0], runs[1], kicks, kick_qw);

@@ -66,10 +66,12 @@ typedef struct { u32 hdr, data; Lod l[NL]; u8 *col; u32 ncol; } Tf;
 static u32 mesh_id(u32 i, int L, int dyn) { return i * 4 + (L == L2 ? 0 : L == L1 ? 1 : dyn ? 3 : 2); }
 
 static int on = -1;
+static unsigned long long n_direct, n_direct_bad;
 static unsigned long long n_mesh[32], n_vu[32], n_chains;   /* (statistics by mode: logged now and then) */
 static Tf *tf; static u32 ntf;
 static u32 sig_tbl, sig_cnt, sig_sum; static const void *sig_lvl;
-static u32 t_addr;                          /* the level's tag templates t4..t7 (their VIF codes) */
+static u32 t_addr;
+static int all_ok;                          /* every level of detail of every tfrag has its meshes */                          /* the level's tag templates t4..t7 (their VIF codes) */
 
 /* packet start address -> tfrag * 2 + (0: the LOD2 packet, 1: the common packet) */
 #define HN 8192
@@ -264,7 +266,7 @@ void native_terrain_chain(void)
         for (int m = 0; m < 32 && o < 440; m++)
             if (n_mesh[m] || n_vu[m]) o += snprintf(line + o, sizeof line - o, " %X:%llu/%llu", m, n_mesh[m], n_mesh[m] + n_vu[m]);
         line[o] = 0;
-        uya_log("native terrain: draws as meshes by mode:%s", line);
+        uya_log("native terrain: draws as meshes by mode:%s; straight from TfragProc %llu (%llu failed)", line, n_direct, n_direct_bad);
     }
     const rac1_level_t *lv = rac1_current_level();
     if (!lv) { if (tf) drop_all(); return; }
@@ -293,7 +295,58 @@ void native_terrain_chain(void)
         hput(t->data + rd16(t->hdr + 0x14), i * 2);
         hput(t->data + rd16(t->hdr + 0x16), i * 2 + 1);
     }
+    all_ok = nok == cnt * 3;
     uya_log("native terrain: level %d, %u tfrags, %u of %u levels of detail made meshes (%u vertices)", lv->id, cnt, nok, cnt * 3, nverts);
+}
+
+/* ---- draws from the native TfragProc: segments (runs of draws), each named by a marker ---- */
+#define NSEG 4096
+#define NREC (1 << 16)
+static struct { u32 first, count, k; int reset; } seg[NSEG];
+#define NK 64
+static NativeTerrainConsts kring[NK]; static u32 k_next;
+static u32 rec[NREC];                     /* idx << 8 | mode */
+static u32 seg_next, rec_next, seg_cur = ~0u;
+int native_terrain_ready(u32 tbl) { return on > 0 && tf && tbl == sig_tbl && all_ok; }
+int native_terrain_can_draw(u32 tbl, u32 idx, u32 mode)
+{
+    if (on <= 0 || !tf || tbl != sig_tbl || idx >= ntf) return 0;
+    int L = mode == 6 ? L2 : (mode == 8 || mode == 0xA) ? L1 : L0;
+    if (mode == 2 && !(uya_gs_renderer_gl() || getenv("UYA_NTCLIP"))) return 0;
+    return tf[idx].l[L].ok;
+}
+u32 native_terrain_consts(const NativeTerrainConsts *k)
+{
+    u32 id = k_next++ % NK;
+    kring[id] = *k;
+    return id;
+}
+u32 native_terrain_seg_begin(u32 kid, int reset)
+{
+    u32 id = seg_next++ % NSEG;
+    seg[id].first = rec_next; seg[id].count = 0; seg[id].k = kid; seg[id].reset = reset;
+    seg_cur = id;
+    return id;
+}
+void native_terrain_seg_add(u32 idx, u32 mode)
+{
+    rec[rec_next++ % NREC] = idx << 8 | mode;
+    seg[seg_cur].count++;
+}
+static int draw(u32 i, int L, u32 mode);
+static const NativeTerrainConsts *K;   /* (the constants of the direct draws being drawn; 0: VU memory) */
+static void seg_draw(u32 id)
+{
+    id %= NSEG;
+    if (seg[id].reset) native_tfrag_reset();   /* (the template's MSCAL 0, which the chain no longer has) */
+    K = seg[id].k == ~0u ? 0 : &kring[seg[id].k % NK];
+    for (u32 k = 0; k < seg[id].count; k++) {
+        u32 r = rec[(seg[id].first + k) % NREC], idx = r >> 8, mode = r & 0xFF;
+        int L = mode == 6 ? L2 : (mode == 8 || mode == 0xA) ? L1 : L0;
+        if (idx < ntf && draw(idx, L, mode)) { n_mesh[mode & 31]++; n_direct++; }
+        else { n_direct_bad++; static int told; if (told++ < 5) uya_log("native terrain: a direct draw failed (tfrag %u, mode %X): not drawn", idx, mode); }
+    }
+    K = 0;
 }
 
 /* ---- a tfrag's draw in the chain ---- */
@@ -306,7 +359,15 @@ void native_terrain_flush(void)
     for (int i = 0; i < g.n; i++) uya_dma_vif1_replay(g.tag[i], g.tte);
 }
 
-static void fl4(u32 q, float f[4]) { memcpy(f, VU1MEM + (q & 0x3FF) * 16, 16); }
+/* the frame's constants: VU1 memory (the chain's template and DrawTfrag's transform, unpacked by
+ * the VIF), or, for TfragProc's direct draws, the snapshot it took of their sources */
+static void fl4(u32 q, float f[4])
+{
+    q &= 0x3FF;
+    if (K && q >= 5 && q < 9) { memcpy(f, K->m[q - 5], 16); return; }
+    if (K && q >= 656 && q < 671) { memcpy(f, K->c[q - 656], 16); return; }
+    memcpy(f, VU1MEM + q * 16, 16);
+}
 
 /* VU arithmetic for the colours (native_tfrag.c's) */
 static float fc(float x) { u32 b; memcpy(&b, &x, 4); if ((b & 0x7F800000u) == 0x7F800000u) { b = (b & 0x80000000u) | 0x7F7FFFFFu; memcpy(&x, &b, 4); } return x; }
@@ -333,8 +394,11 @@ static int morph_vertices(Tf *t, int L, u32 mode, u32 id)
         static int told; if (!told++) { u32 c[2]; memcpy(c, EE(t_addr + 16 * (k - 4) + 8), 8); uya_log("native terrain: the colours' unpack failed (template %d: %08X %08X, cl %u wl %u)", k, c[0], c[1], vs.cl, vs.wl); }
         return 0;
     }
-    memcpy(mem + 5 * 4, VU1MEM + 5 * 16, 4 * 16);           /* the transform (DrawTfrag's) */
-    memcpy(mem + 656 * 4, VU1MEM + 656 * 16, 14 * 16);      /* the constants (the chain's template) */
+    if (K) { memcpy(mem + 5 * 4, K->m, 4 * 16); memcpy(mem + 656 * 4, K->c, 14 * 16); }
+    else {
+        memcpy(mem + 5 * 4, VU1MEM + 5 * 16, 4 * 16);           /* the transform (DrawTfrag's) */
+        memcpy(mem + 656 * 4, VU1MEM + 656 * 16, 14 * 16);      /* the constants (the chain's template) */
+    }
     if (native_tfrag_lod_vertices(mode * 8, (u8 *)mem, 0)) { static int told; if (!told++) uya_log("native terrain: no LOD start 0x%X", mode * 8); return 0; }
     float cs[4]; native_tfrag_cscale(cs);
     for (u32 v = 0; v < l->nv; v++) {
@@ -412,6 +476,11 @@ static int draw(u32 i, int L, u32 mode)
 int native_terrain_tag(const u32 *q, int tte)
 {
     if (on <= 0 || !tf || !tte) { native_terrain_flush(); return 0; }
+    if ((q[0] & 0x7000FFFFu) == 0x10000000u && q[2] == NATIVE_TERRAIN_MARK && (q[3] >> 16) == 0) {   /* a segment of direct draws */
+        native_terrain_flush();
+        seg_draw(q[3] & 0xFFFF);
+        return 1;
+    }
     u32 id = (q[0] >> 28) & 7, qwc = q[0] & 0xFFFF, addr = q[1] & 0x7FFFFFFF, v;
     if (!g.open) {
         if (id != 3 || !hget(addr, &v)) return 0;

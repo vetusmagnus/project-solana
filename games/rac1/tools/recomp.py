@@ -49,6 +49,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import region as _region
 RC = _region.consts(REGION)
 LEVEL = DUMP = EXEGEN = None
+# game routines the host does natively (host/src/native), by name: name -> hook prefix
+HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragproc.c)
+              "func_00236F00": "uya_tieproc",       # TieProc (native_tieproc.c)
+              "func_00229F00": "uya_shrubproc",     # ShrubProc (native_shrubproc.c)
+              "func_L00_002569F8": "uya_mobyproc",  # MobyProc (native_mobyproc.c; level code)
+              "func_00212658": "uya_mobyproc",      # MobyProc, the executable's copy (before a level program is loaded: the boot screens)
+              "func_L00_001EEBD8": "uya_mobyskin",  # the moby skin driver and its VU0 program (native_mobyskin.c)
+              "func_001EE9F8": "uya_mobyskin"}      # the skin driver, the executable's copy (the boot screens)
 _a = sys.argv[3:]
 while _a:
     _o = _a.pop(0)
@@ -753,6 +761,24 @@ def translate(name, rng=None, entries=None):
                "    switch (entry) { %s }" % " ".join("case 0x%08X: goto L_%08X;" % (e, e) for e in sorted(entries))]
     else:
         out = ["void %s%s(RcCtx *c)\n{" % (P, name)]
+    hook = HOST_HOOKS.get(name)
+    if hook:
+        # a game routine the host does natively (host/src/native): its hook gets the level's
+        # data references, read from the routine's own bytes (gp offsets and lui/addiu pairs,
+        # in order), and returns 1 when it did the routine
+        gofs, absv = [], []
+        for k, (pc, w) in enumerate(ins):
+            op = w >> 26
+            if op != 15 and ((w >> 21) & 31) == 28 and op in (0x23, 0x2B, 0x1E, 0x1F, 0x36, 0x3E, 0x37, 0x3F, 0x21, 0x25, 0x24, 0x20, 0x28, 0x29):
+                gofs.append(w & 0xFFFF if (w & 0xFFFF) < 0x8000 else (w & 0xFFFF) - 0x10000)
+            if op == 15:                       # lui rt: its addiu rt, rt, lo
+                rt = (w >> 16) & 31
+                for pc2, w2 in ins[k + 1:k + 4]:
+                    if (w2 >> 26) == 9 and ((w2 >> 16) & 31) == rt and ((w2 >> 21) & 31) == rt:
+                        lo = w2 & 0xFFFF; lo = lo - 0x10000 if lo >= 0x8000 else lo
+                        absv.append(((w & 0xFFFF) << 16) + lo & 0xFFFFFFFF); break
+        (out.insert if entries else (lambda _i, _x: out.append(_x)))(1, "    %s{ extern int %s_enter(RcCtx *, const s32 *, int, const u32 *, int); if (%s_enter(c, (const s32[]){%s}, %d, (const u32[]){%s}, %d)) return; }"
+                   % ("if (entry == 0x%08X) " % va if entries else "", hook, hook, ", ".join("%d" % v for v in gofs), len(gofs), ", ".join("0x%08Xu" % v for v in absv), len(absv)))
     if name in TRACE_FUNCS:       # testing: UYA_RC_TRACE at build time (rc_trace logs the calls)
         out.append('    { extern void rc_trace(RcCtx *, const char *); rc_trace(c, "%s"); }' % name)
     if name == "func_001F7EF8":   # testing: drawquad's GS words checked (UYA_QUADCHECK)
@@ -775,7 +801,8 @@ def translate(name, rng=None, entries=None):
         if nm in ("jr",):
             rs = (w >> 21) & 31
             if rs == 31:
-                out.append("    %s return;" % delay)
+                if hook: out.append("    %s { extern void %s_exit(RcCtx *); %s_exit(c); } return;" % (delay, hook, hook))
+                else: out.append("    %s return;" % delay)
             else:
                 out.append("    { u32 tgt = (u32)%s; %s if (tgt == rc_ra0) return; switch (tgt) { @CASES@ default: rc_dispatch(c, tgt); return; } }" % (R(rs), delay))
             if has_delay and pc + 4 in labels: out.append("    if (0) { L_%08X:; %s }" % (pc + 4, delay))

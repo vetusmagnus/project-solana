@@ -7,14 +7,15 @@
  * register writes, and strips of plain vertices (position, colour, texture
  * coordinates, whether the vertex closes a triangle), with the same meaning as
  * the GIF data, so the same primitives are drawn without decoding PS2 GIF
- * packets. Data of another shape (none of the four renderers sends any) goes
- * on as it is. UYA_DLIST=0 sends everything as GIF packets (to compare). */
+ * packets. Data of another shape goes register by register (native_gif,
+ * below). UYA_DLIST=0 sends everything as GIF packets (to compare). */
 #include "native_dlist.h"
 #include <stdlib.h>
 #include <string.h>
 
 void uya_gif_packet(const u32 *data, u32 qwc);
 void uya_gs_dlist(const u32 *d, u32 qwc);
+void native_gif(int path, const u32 *d, u32 qwc);
 
 /* the list for a PATH1 packet (as XGKICK sends it: from a tag, to the EOP);
  * returns its qwords, or 0 if the packet has data of another shape */
@@ -78,11 +79,94 @@ void native_kick(const u32 *pk, u32 qwc)
     if (cap > bufq) { free(buf); buf = malloc((size_t)cap * 16); bufq = cap; }
     u32 n = buf ? convert(pk, qwc, buf, cap) : 0;
     if (n) uya_gs_dlist(buf, n);
-    else {
-        static int told;
-        if (!told++) uya_log("native draw list: a packet of another shape went as GIF data");
-        uya_gif_packet(pk, qwc);
+    else native_gif(0, pk, qwc);   /* (another shape: register by register) */
+}
+
+/* ---- the game's own GIF data (VIF1 DIRECT, PATH2) ----
+ * Game code on the EE writes GIF packets for the HUD, text, fades, the sky,
+ * shadow volumes and GS state, and sends them with VIF1 DIRECT. Each tag
+ * whose data is all in the packet becomes ops that set the GS registers and
+ * kick the vertices exactly as the GIF front end (gs.c uya_gs_gif_) would:
+ * PACKED registers one by one (ops 1, 10 to 14), REGLIST as register writes
+ * (op 1), the tag's PRIM (op 1) and Q reset (op 3). IMAGE transfers (texture
+ * uploads, piece 5) and a tag whose data runs on into the next packet go on
+ * as GIF data, in order; p_left counts that tag's qwords still to come, as
+ * the path's tag state does. The GS library's PATH3 packets (gsdk.c, the GIF
+ * DMA channel) go the same way, with their own tag state. UYA_DLIST=0 sends
+ * it all as GIF data. */
+static u32 p_left[3], p_img[3];
+static unsigned long long dir_n[3];   /* (qwords as ops, as GIF data: IMAGE, split tags) */
+void native_direct_stats(void)
+{
+    if (dir_n[0] | dir_n[1] | dir_n[2])
+        uya_log("native GIF (PATH2, PATH3, other PATH1 shapes): %llu qwords as draw-list ops; as GIF data %llu IMAGE, %llu of split tags", dir_n[0], dir_n[1], dir_n[2]);
+}
+void native_gif(int path, const u32 *d, u32 qwc)
+{
+    static int on = -1;
+    static u32 *buf; static u32 bufq;
+    if (on < 0) { const char *e = getenv("UYA_DLIST"); on = !e || atoi(e) != 0; }
+    if (!on || !qwc) { uya_gif_packet(d, qwc); return; }
+    u32 cap = qwc * 2 + 16;
+    if (cap > bufq) { free(buf); buf = malloc((size_t)cap * 16); bufq = cap; }
+    u32 q = 0, o = 0;
+#define PUT4(a, b, c_, e) do { u32 *w_ = buf + o * 4; w_[0] = (a); w_[1] = (b); w_[2] = (c_); w_[3] = (e); o++; } while (0)
+#define FLUSH() do { if (o) { uya_gs_dlist(buf, o); o = 0; } } while (0)
+    if (path == 0) p_left[0] = 0;   /* (XGKICK starts a packet at its tag) */
+    if (p_left[path]) {
+        u32 n = p_left[path] < qwc ? p_left[path] : qwc;
+        uya_gif_packet(d, n); dir_n[p_img[path] ? 1 : 2] += n;
+        p_left[path] -= n; q = n;
     }
+    while (q < qwc) {
+        const u32 *t = d + q * 4;
+        u64 lo = ((u64)t[1] << 32) | t[0], hi = ((u64)t[3] << 32) | t[2];
+        u32 nloop = (u32)(lo & 0x7FFF), pre = (u32)(lo >> 46) & 1, primv = (u32)(lo >> 47) & 0x7FF;
+        u32 flg = (u32)(lo >> 58) & 3, nreg = (u32)(lo >> 60) & 15;
+        if (!nreg) nreg = 16;
+        u32 len = flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
+        if (flg >= 2 || q + 1 + len > qwc) {
+            u32 avail = qwc - q - 1 < len ? qwc - q - 1 : len;
+            FLUSH();
+            uya_gif_packet(t, 1 + avail); dir_n[flg >= 2 ? 1 : 2] += 1 + avail;
+            p_left[path] = len - avail; p_img[path] = flg >= 2; q += 1 + avail;
+            continue;
+        }
+        q++;
+        if (pre) PUT4(1, 0x00, primv, 0);
+        PUT4(3, 0, 0, 0);
+        if (flg == 0) {
+            for (u32 i = 0; i < len; i++, q++) {
+                const u32 *v = d + q * 4;
+                u32 rg = (u32)(hi >> ((i % nreg) * 4)) & 15;
+                switch (rg) {
+                case 0x0: PUT4(1, 0x00, v[0], v[1]); break;
+                case 0x1: PUT4(10, (v[0] & 255) | ((v[1] & 255) << 8) | ((v[2] & 255) << 16) | ((v[3] & 255) << 24), 0, 0); break;
+                case 0x2: PUT4(11, v[0], v[1], v[2]); break;
+                case 0x3: PUT4(12, (v[0] & 0x3FFF) | ((v[1] & 0x3FFF) << 16), 0, 0); break;
+                case 0x4: PUT4(13, (v[0] & 0xFFFF) | (v[1] << 16), (v[2] >> 4) & 0xFFFFFF, ((v[3] >> 4) & 255) | ((u32)!((v[3] >> 15) & 1) << 8)); break;
+                case 0x5: PUT4(13, (v[0] & 0xFFFF) | (v[1] << 16), v[2], (u32)!((v[3] >> 15) & 1) << 8); break;
+                case 0xA: PUT4(14, (v[3] >> 4) & 255, 0, 0); break;
+                case 0xC: PUT4(13, (v[0] & 0xFFFF) | (v[1] << 16), (v[2] >> 4) & 0xFFFFFF, (v[3] >> 4) & 255); break;
+                case 0xD: PUT4(13, (v[0] & 0xFFFF) | (v[1] << 16), v[2], 0); break;
+                case 0xE: PUT4(1, v[2] & 0xFF, v[0], v[1]); break;
+                case 0xF: break;
+                default: PUT4(1, rg, v[0], v[1]); break;
+                }
+            }
+        } else {
+            for (u32 i = 0; i < nloop * nreg; i++) {
+                const u32 *v = d + (q + i / 2) * 4 + (i & 1) * 2;
+                u32 rg = (u32)(hi >> ((i % nreg) * 4)) & 15;
+                if (rg != 0xE && rg != 0xF) PUT4(1, rg, v[0], v[1]);
+            }
+            q += len;
+        }
+        dir_n[0] += 1 + len;
+    }
+    FLUSH();
+#undef PUT4
+#undef FLUSH
 }
 
 /* ---- native meshes ---- */

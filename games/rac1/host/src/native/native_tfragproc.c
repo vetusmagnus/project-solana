@@ -474,7 +474,7 @@ static void put_back(const typeof(A) *s, u32 gp)
     rc_sw(gp, s->pkt);
 }
 
-int uya_tfragproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int tfragproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     if (mode_ < 0) { const char *e = getenv("UYA_NTFPROC"), *n = getenv("UYA_NATIVE"); mode_ = e ? atoi(e) : (n && !atoi(n)) ? 0 : 2; uya_log("native TfragProc: %s", mode_ == 0 ? "off (the game's routine)" : mode_ == 1 ? "check against the game's routine" : "on"); }
     if (!mode_) return 0;
@@ -496,7 +496,7 @@ int uya_tfragproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     return 0;
 }
 
-void uya_tfragproc_exit(RcCtx *c)
+static void tfragproc_exit_(RcCtx *c)
 {
     (void)c;
     if (mode_ != 1 || !N.valid) return;
@@ -523,3 +523,16 @@ void uya_tfragproc_exit(RcCtx *c)
     else n_ok++;
     if (n_runs % 500 == 0) uya_log("native TfragProc check: %llu runs, %llu identical, %llu differ; tfrags %llu: occluded %llu, crossing %llu, to the clip list %llu; modes 6:%llu 8:%llu A:%llu E:%llu 10:%llu 14:%llu", n_runs, n_ok, n_bad, st_seen, st_occl, st_cross, st_clip, st_mode[6], st_mode[8], st_mode[10], st_mode[14], st_mode[16], st_mode[20]);
 }
+
+/* (the packets this module writes into the chain: the return scan over them, native_2d.c: the
+ * conversions, the host draw list) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
+int uya_tfragproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = tfragproc_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_tfragproc_exit(RcCtx *c) { tfragproc_exit_(c); uya_texdma_exit(c); }

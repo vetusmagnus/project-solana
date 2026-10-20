@@ -1306,7 +1306,7 @@ static int differs(const char *what, u32 base, const u8 *g, const u8 *n, u32 len
     return 1;
 }
 
-int uya_mobyproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int mobyproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     if (mode_ < 0) {
         const char *e = getenv("UYA_NMOBYPROC"), *n = getenv("UYA_NATIVE");
@@ -1319,7 +1319,10 @@ int uya_mobyproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     Out o;
     if (mode_ >= 2) {
         dmode_ = native_mobyseg_mode();                  /* (the direct draws: only here, never in check mode) */
+        u32 hl0_ = M32((u32)c->r[28].d[0] + (u32)R.g_pkt);
         run(c, &R, &o);
+    { void uya_hl_take(u32, u32); u32 gp_ = (u32)c->r[28].d[0]; uya_hl_take(hl0_, M32(gp_ + (u32)R.g_pkt2)); }   /* (its packets into the host draw list: sdk/hostlist.c) */
+        { void uya_lk_mshadow_reserve(u32); uya_lk_mshadow_reserve(M32((u32)c->r[28].d[0] + (u32)R.g_slot)); }   /* (the shadows' slot: native_link.c) */
         /* what the game's routine leaves: v0 (the records' end + 0x10), v1, at, the upper halves of
          * s5, s6 and sp, LO/HI (the low doublewords of s0..s7, sp, fp, ra are as on entry) */
         c->r[2].d[0] = o.v0;
@@ -1354,7 +1357,7 @@ int uya_mobyproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     return 0;
 }
 
-void uya_mobyproc_exit(RcCtx *c)
+static void mobyproc_exit_(RcCtx *c)
 {
     if (mode_ != 1 || !N.valid) return;
     N.valid = 0;
@@ -1407,3 +1410,16 @@ void uya_mobyproc_exit(RcCtx *c)
                 st_defer, st_dside, st_dfull, st_d800, st_shadow, st_shcull, st_edge, st_dnow, st_p2, st_p2skip, st_lod[0], st_lod[1],
                 st_frames, st_seq, st_one, st_blend, st_pl[0], st_pl[1], st_pl[2], st_cp, st_cpfull, st_cpnone, st_gs, st_pkt, st_extra, st_xpkt);
 }
+
+/* (the packets this module writes into the chain: the return scan over them, native_2d.c: the
+ * conversions, the host draw list) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
+int uya_mobyproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = mobyproc_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_mobyproc_exit(RcCtx *c) { mobyproc_exit_(c); uya_texdma_exit(c); }

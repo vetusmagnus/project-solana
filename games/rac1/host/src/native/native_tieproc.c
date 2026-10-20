@@ -918,7 +918,12 @@ static int tieproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     if (!mode_) return 0;
     if (ng != 15 || na != 18) { static int told; if (!told++) uya_log("native TieProc: the level's routine has %d / %d data references (not 15 / 18): the game's routine runs", ng, na); return 0; }
     TieRefs R = refs_of(g, a);
-    if (mode_ >= 2) { direct = mode_ == 2; run(c, &R); return 1; }
+    if (mode_ >= 2) {
+        u32 hl0_ = M32((u32)c->r[28].d[0] + (u32)R.g_pkt);
+        direct = mode_ == 2; run(c, &R);
+    { void uya_hl_take(u32, u32); u32 gp_ = (u32)c->r[28].d[0]; uya_hl_take(hl0_, M32(gp_ + (u32)R.g_pkt2)); }   /* (its packets into the host draw list: sdk/hostlist.c) */
+        return 1;
+    }
     direct = 0;
     /* check: run here, keep the results, put the state back for the game's routine */
     const u32 gp = (u32)c->r[28].d[0];
@@ -977,6 +982,7 @@ int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
 void uya_texdma_exit(RcCtx *c);
 int uya_tieproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
+    void uya_lk_tie_reserve(void); uya_lk_tie_reserve();   /* (DrawTies_2's reservation is the qword before: native_link.c) */
     uya_texdma_enter(c, g, ng, a, na);
     int r = tieproc_enter_(c, g, ng, a, na);
     if (r) uya_texdma_exit(c);

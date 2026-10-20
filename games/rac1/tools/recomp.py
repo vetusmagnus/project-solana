@@ -92,9 +92,7 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_0022B648": "uya_texdma",       # BuildShrubTextureDma
               "func_L00_002963D8": "uya_texdma",   # BuildTfragTextureDma (level code)
               "func_00212258": "uya_texdma",       # the mobys' texture uploads
-              "func_L00_0024E798": "uya_texdma",   # the upload list's (level code; it leaves by tail calls, so its callers too:)
-              "func_001F4748": "uya_texdma",       # the frame's upload list
-              "func_0022C870": "uya_texdma",       # the sky's pager and its uploads
+              "func_L00_0024E798": "uya_texdma",   # the upload list's (level code; it leaves by tail calls, so its callers too: DoGifPaging and DoSkyGifPaging, through their link hooks below)
               "func_0020C2F8": "uya_texdma",       # the upload list's sender, the executable's copy (the boot screens)
               "func_00236060": "uya_texdma",       # BuildTfragTextureDma, the executable's copy
               # the GS state tables sent by REF: converted at the writer's return (native_2d.c stab_one)
@@ -110,16 +108,47 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_L09_0021E770": "uya_texdma",   # a table (level 9)
               "func_L09_0021E410": "uya_texdma",   # an animated texture's setup and upload (level 9)
               "func_L02_002A58C0": "uya_texdma",   # FOGCOL (levels 2, 9)
-              "func_L05_0030EB40": "uya_texdma"}   # ALPHA_1 / ALPHA_2, copied into the chain (level 5)        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+              "func_L05_0030EB40": "uya_texdma",   # ALPHA_1 / ALPHA_2, copied into the chain (level 5)
+              "func_00201AF0": "uya_texdma",       # the boot program's image packets (the host draw list: their writers' returns)
+              "func_00234F40": "uya_texdma",       # a REF to the GS register reset table
+              "func_00232A00": "uya_texdma",       # the space level's and boot program's sprite packets
+              "func_L01_002BA380": "uya_texdma",   # the strips' entry list (levels 1, 5, 7, 11-13): its closing FLUSHA
+              # the chain's link writers: the splices as host links (native_link.c), small writers' items at their return
+              "func_00235290": "uya_texdma",       # Vif1ChainCmd (the interrupt tag)
+              "func_00234B48": "uya_texdma",       # VU1_addDataRef
+              "func_00234C50": "uya_texdma",       # a CNT with a VIF word
+              "func_00229E50": "uya_lk_rshrub",    # DrawShrubs (reserves)
+              "func_002346C0": "uya_lk_rtfrag",    # DrawTfrag (reserves)
+              "func_0020E0C8": "uya_lk_rmoby",     # DrawMobysSetup (reserves last)
+              "func_0022C7E0": "uya_lk_rsky",      # SetupSkyGifPaging (reserves)
+              "func_001F4630": "uya_lk_rgif",      # SetupGifPaging (reserves)
+              "func_00229C08": "uya_lk_sshrub",    # DmaShrubTextures (splices)
+              "func_002344D8": "uya_lk_stfrag",    # DmaTfragTextures (splices)
+              "func_0020DC40": "uya_lk_smoby",     # DmaMobyTextures (splices)
+              "func_0022C870": "uya_lk_ssky",      # DoSkyGifPaging (splices)
+              "func_001F4748": "uya_lk_sgif",      # DoGifPaging (splices)
+              "func_0020DEB0": "uya_lk_smshadow",  # the moby shadows (splices; the slot is MobyProc's)
+              "func_00236958": "uya_lk_stie",      # DmaTieTextures (splices)
+              "func_002349B8": "uya_lk_end"}        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
 HOST_HOOKS_ALLREFS = {"uya_hudsprite", "uya_hudflip", "uya_clearref", "uya_addgsreg", "uya_setscissor", "uya_stencilclr", "uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",
                       "uya_stripb_a52d0", "uya_stripb_16b38", "uya_stripb_c2b08", "uya_stripb_bd3d0"}
+# native hooks with the return scan around them (native_2d.c uya_texdma_enter / exit: the conversions,
+# and the host draw list's taking of what they wrote, sdk/hostlist.c); the other natives call it
+# themselves (native_shrubproc.c, native_tieproc.c, native_mobyproc.c, native_tfragproc.c,
+# native_stripb.c, native_link.c, native_2d.c's darkening pass and frame copy)
+HOST_HOOKS_SCAN = {"uya_partproc", "uya_partlist", "uya_dtquad", "uya_skyg", "uya_skyt", "uya_shadowvol", "uya_billboards",
+                   "uya_mobyskin", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripl1", "uya_addgsreg",
+                   "uya_setscissor", "uya_hudsprite", "uya_hudflip", "uya_stencilclr", "uya_fogquad", "uya_clearref",
+                   "uya_fogfan", "uya_fadeset", "uya_rectovl"}
 # hooks whose references end with the routine's calls (each jal's target, in order)
 HOST_HOOKS_CALLS = {"uya_hudsprite", "uya_hudflip"}
 # hooks that also go on the other places the levels' catalogue gives their routine (a level names
 # AA_BlurPass's twin as a second place of the first; the hook tells them apart by their references)
-HOST_HOOKS_ALLPLACES = {"uya_blurpass"}
+HOST_HOOKS_ALLPLACES = {"uya_blurpass", "uya_lk_rshrub", "uya_lk_rtfrag", "uya_lk_rmoby", "uya_lk_rsky", "uya_lk_rgif",
+                        "uya_lk_sshrub", "uya_lk_stfrag", "uya_lk_smoby", "uya_lk_ssky", "uya_lk_sgif", "uya_lk_stie", "uya_lk_smshadow", "uya_lk_end",
+                        "uya_texdma"}   # (the return scan: every place, e.g. level 5's Vif1ChainCmd is not the first)
 _a = sys.argv[3:]
 while _a:
     _o = _a.pop(0)
@@ -856,8 +885,12 @@ def translate(name, rng=None, entries=None):
                         lo = w2 & 0xFFFF; lo = lo - 0x10000 if lo >= 0x8000 else lo
                         absv.append(((w & 0xFFFF) << 16) + lo & 0xFFFFFFFF); break
         if hook in HOST_HOOKS_CALLS: absv += calls
-        (out.insert if entries else (lambda _i, _x: out.append(_x)))(1, "    %s{ extern int %s_enter(RcCtx *, const s32 *, int, const u32 *, int); if (%s_enter(c, (const s32[]){%s}, %d, (const u32[]){%s}, %d)) return; }"
-                   % ("if (entry == 0x%08X) " % va if entries else "", hook, hook, ", ".join("%d" % v for v in gofs), len(gofs), ", ".join("0x%08Xu" % v for v in absv), len(absv)))
+        _g = "(const s32[]){%s}, %d, (const u32[]){%s}, %d" % (", ".join("%d" % v for v in gofs), len(gofs), ", ".join("0x%08Xu" % v for v in absv), len(absv))
+        if hook in HOST_HOOKS_SCAN:
+            _call = "{ extern int uya_texdma_enter(RcCtx *, const s32 *, int, const u32 *, int); extern void uya_texdma_exit(RcCtx *); extern int %s_enter(RcCtx *, const s32 *, int, const u32 *, int); uya_texdma_enter(c, %s); if (%s_enter(c, %s)) { uya_texdma_exit(c); return; } }" % (hook, _g, hook, _g)
+        else:
+            _call = "{ extern int %s_enter(RcCtx *, const s32 *, int, const u32 *, int); if (%s_enter(c, %s)) return; }" % (hook, hook, _g)
+        (out.insert if entries else (lambda _i, _x: out.append(_x)))(1, "    %s%s" % ("if (entry == 0x%08X) " % va if entries else "", _call))
     if name in TRACE_FUNCS:       # testing: UYA_RC_TRACE at build time (rc_trace logs the calls)
         out.append('    { extern void rc_trace(RcCtx *, const char *); rc_trace(c, "%s"); }' % name)
     if name == "func_001F7EF8":   # testing: drawquad's GS words checked (UYA_QUADCHECK)
@@ -880,7 +913,7 @@ def translate(name, rng=None, entries=None):
         if nm in ("jr",):
             rs = (w >> 21) & 31
             if rs == 31:
-                if hook: out.append("    %s { extern void %s_exit(RcCtx *); %s_exit(c); } return;" % (delay, hook, hook))
+                if hook: out.append("    %s { extern void %s_exit(RcCtx *); %s_exit(c);%s } return;" % (delay, hook, hook, " extern void uya_texdma_exit(RcCtx *); uya_texdma_exit(c);" if hook in HOST_HOOKS_SCAN else ""))
                 else: out.append("    %s return;" % delay)
             else:
                 out.append("    { u32 tgt = (u32)%s; %s if (tgt == rc_ra0) return; switch (tgt) { @CASES@ default: rc_dispatch(c, tgt); return; } }" % (R(rs), delay))

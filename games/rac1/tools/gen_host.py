@@ -88,6 +88,10 @@ def strip_comments_keep_len(s):
 
 host_defined = set()
 STATIC = os.environ.get("UYA_STATIC", "1") != "0"   # RAC1_STATICRECOMP: translate the whole game from its bytes
+# labelled C (`func_X_r(...) __asm__("func_X")`) the static recompilation translates from the game's bytes
+# too, so recomp.py's hooks reach them: the sky's shells, which write the boot program's chain (the host
+# draw list, host/src/sdk/hostlist.c, takes what they wrote at their return)
+STATIC_LABELLED = {"func_0022CC40", "func_0022CA00"}
 for p in glob.glob(os.path.join(HOSTDIR, "src", "**", "*.c"), recursive=True):
     host_defined |= set(re.findall(r"^[\w \t\*]*\b(func_(?:L\d\d_)?[0-9A-Fa-f]{6,8})\s*\([^;{]*\)\s*\{", strip_comments_keep_len(open(p).read()), re.M))
 
@@ -505,8 +509,8 @@ for rel in files:
             # static recompilation (RAC1_STATICRECOMP): every game function of the
             # executable is translated from the game's bytes too; only the host's
             # own implementations (host/src, host/overrides) stay
-            static_main = (LEVEL is None and STATIC and base_func(name) == name and name.startswith("func_")
-                           and name not in host_defined and name not in overrides
+            static_main = (LEVEL is None and STATIC and (base_func(name) == name and name.startswith("func_") or lab.get(name) in STATIC_LABELLED)
+                           and name not in host_defined and name not in overrides and lab.get(name) not in overrides
                            and not re.search(r"\)\s*[A-Za-z_][^{]*;\s*$", src[s:bpos].rstrip("{ \n\t")))
             if static_main or (LEVEL is not None and (name in has_asm or foreign) and name not in overrides):
                 # inline asm (VU0, MMI...): the level's own bytes are translated
@@ -516,7 +520,7 @@ for rel in files:
                     head = head[:head.index("(")] + "()"            # K&R parameters: an old-style declaration
                 out.append("/* host: %s %s: translated from the game's bytes */\n%s;" % (
                     name, "static" if static_main else ("has C for another level" if foreign else "has inline asm"), head.rstrip()))
-                if lab.get(name) in PLACES: name = lab[name]          # labelled C: the label is the function
+                if lab.get(name) in PLACES or (static_main and lab.get(name) in STATIC_LABELLED): name = lab[name]   # labelled C: the label is the function
                 asm_entries.append(name); report[name] = "static (recompiled)" if static_main else ("other level's C (recompiled)" if foreign else "inline asm (recompiled)")
                 pos = e
                 continue

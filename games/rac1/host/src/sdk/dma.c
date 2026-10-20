@@ -121,6 +121,9 @@ s32 uyafn_12D938(void *chan, void *tag)
     if (nsends <= 4 || (nsends & (nsends - 1)) == 0)
         uya_log("DMA send #%llu on channel %d, chain at 0x%08X (%llu qwords so far)", nsends, ch, t, nqw);
     if (ch == 1) native_terrain_chain();
+    void uya_hl_send_begin(u32), uya_hl_walk_item(u32, const u32 *), uya_hl_send_end(int), uya_hl_put(u32);
+    const u32 *uya_hl_draw(u32, const u32 *);
+    if (ch == 1) uya_hl_send_begin(t);   /* (the host draw list, UYA_HL: followed here, compared with this walk: sdk/hostlist.c) */
     /* testing: UYA_CHAINORDER=v logs the first channel-1 walk from vsync v as runs of tags in address order and
      * the jumps between them: where the order the chain is walked leaves the order it was written */
     static long long co_v = -2; if (co_v == -2) { const char *e = getenv("UYA_CHAINORDER"); co_v = e ? atoll(e) : -1; }
@@ -135,6 +138,7 @@ s32 uyafn_12D938(void *chan, void *tag)
     if (ch == 1 && wt_v >= 0 && (long long)uya_frame_count() >= wt_v) { char fn[64]; snprintf(fn, sizeof fn, "walk_%lld.txt", wt_v); wt = fopen(fn, "w"); wt_v = -1; }
     for (int guard = 0; guard < 1000000; guard++) {
         u32 *q = phys(t);
+        if (ch == 1) { uya_hl_walk_item(t, q); q = (u32 *)uya_hl_draw(t, q); }   /* (UYA_HLDRAW: the item from the host draw list, the game's compared) */
         if (co) {
             if (t != co_prev) {   /* a jump: the run before it ends */
                 uya_log("CHAINORDER run %u: %08X..%08X (%u tags), then %s to %08X", co_nrun, co_run0, co_prev, co_ntag, t > co_prev ? "forward" : "BACK", t);
@@ -179,26 +183,26 @@ s32 uyafn_12D938(void *chan, void *tag)
                 native_terrain_flush();
                 int r = native_2d_tag(q, t);
                 if (r == 1) { t = addr; continue; }
-                if (r == 2) continue;
+                if (r == 2) { uya_hl_put(t); continue; }   /* (the packet put back: into the list too, read again) */
             }
             /* DrawTfrag's transform packets as a record (host/src/native/native_tfragproc.c) */
             if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_TXFORM_MARK) {
                 native_terrain_flush();
                 int r = native_tfrag_xform_tag(q, t);
                 if (r == 1) { t = addr; continue; }
-                if (r == 2) continue;
+                if (r == 2) { uya_hl_put(t); continue; }   /* (the packet put back: into the list too, read again) */
             }
             if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_PART_MARK) {
                 native_terrain_flush();
                 int r = native_part_tag(q, t);
                 if (r == 1) { t = addr; continue; }
-                if (r == 2) continue;
+                if (r == 2) { uya_hl_put(t); continue; }   /* (the packet put back: into the list too, read again) */
             }
             if (!irq && id == 2 && qwc == 0 && q[2] == NATIVE_MOBY_MARK) {
                 native_terrain_flush();
                 int r = native_moby_tag(q, t, tte != 0);
                 if (r == 1) { t = addr; continue; }
-                if (r == 2) continue;
+                if (r == 2) { uya_hl_put(t); continue; }   /* (the packet put back: into the list too, read again) */
             }
             /* (testing, UYA_NMOBYDIRECT=1: a run's first CNT with a check marker; the tag goes on as it is) */
             if (!irq && id == 1 && (q[1] >> 16) == NATIVE_MOBY_CHKMARK) native_mobyseg_chk_begin(q[1] & 0xFFFF, t);
@@ -243,7 +247,7 @@ s32 uyafn_12D938(void *chan, void *tag)
                 walking[ch] = 1;
                 raise_irq(ch);
                 walking[ch] = 0;
-                if (!(regs[0] & 0x100)) { regs[8] = 0; return 0; }
+                if (!(regs[0] & 0x100)) { regs[8] = 0; if (ch == 1) uya_hl_send_end(1); return 0; }
                 t = regs[12];
                 continue;
             }
@@ -262,6 +266,7 @@ s32 uyafn_12D938(void *chan, void *tag)
     }
     if (co) uya_log("CHAINORDER run %u: %08X..%08X (%u tags), end", co_nrun, co_run0, t, co_ntag);
     if (wt) { fclose(wt); wt = 0; uya_log("UYA_WALKTRACE: written"); }
+    if (ch == 1) uya_hl_send_end(0);
     if (ch == 1) native_terrain_flush();
     if (ch == 1) {
         void uya_gfx_frame_stats(void); void uya_gif_stats(void);

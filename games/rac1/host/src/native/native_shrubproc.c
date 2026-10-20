@@ -1073,8 +1073,10 @@ static int shrubproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na
     if (mode_ >= 2) {
         direct = mode_ == 2;
         hd_n = 0;
+        u32 hl0_ = M32((u32)c->r[28].d[0] + (u32)R.g_pkt);
         run(c, &R);
         for (int k = 0; k < hd_n; k++) uya_stab_at(hd_at[k]);   /* (the heads' GS settings as host records: native_2d.c) */
+    { void uya_hl_take(u32, u32); u32 gp_ = (u32)c->r[28].d[0]; uya_hl_take(hl0_, M32(gp_ + (u32)R.g_pkt2)); }   /* (its packets into the host draw list: sdk/hostlist.c) */
         { static unsigned long long nr; if (direct && ++nr % 300 == 0) uya_log("native ShrubProc: %llu runs; the main and fading parts direct %llu, in the chain %llu", nr, st_ddirect, st_dchain); }
         return 1;
     }

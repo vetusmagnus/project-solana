@@ -683,3 +683,94 @@ C. The walker removed; the DMA interrupt the game's chain sync waits on becomes 
 - Checks: GPU (Windows build), levels 1, 3, 5, 6, 9, 13, UYA_NSTAB=0 UYA_NUPL=0 vs default: 0 px;
   software, all 19 levels, the same settings: 0 px (levels 5, 7, 12, 17 differed by millions of pixels in
   the parallel run, 0 px each rerun alone); boot frames (level 3, vsyncs 170-400): 0 px.
+
+## Step B: the host draw list (19-20 October)
+
+- What the walker follows on the GPU now: one frame of level 3 is 567 items: 331 2D/upload records, 80 tie
+  records, 8 shrub, 6 tie-start, 3 shrub-start, 2 moby, the particles' and transforms', and 125 links
+  (118 NEXT, CNT 0 with FLUSHA or NOP, the interrupt CNT, END).
+- Who writes the links (chain-watch census, the walk trace's writer column through dev/scripts/pc2fn.py,
+  which maps a level's address to the catalogue's routine by config/overlays/functions.tsv): the natives
+  (TieProc 80, ShrubProc 11, TfragProc) and about 14 translated routines: SetupGifPaging/DoGifPaging, the
+  sky's pair, DrawTfrag/DmaTfragTextures, DrawTies_2/DmaTieTextures, DrawShrubs/DmaShrubTextures,
+  DrawMobysSetup/DmaMobyTextures, the moby shadows, Vif1ChainCmd (the interrupt tag), VU1_addDataRef.
+- The idiom (the decomp's C: draw.c, shrubfunc.c, tfragfunc.c, tiefunc.c, mobyfunc.c, skyfunc.c): a
+  reserver leaves a qword R at the chain pointer, the producers draw after it, and a splicer takes the
+  qword p at the chain pointer, appends the textures' uploads, and links R -> p + 16 (uploads first),
+  after the uploads a NEXT -> R + 16 (then the draws), p -> E (then on). So a reserved slot is final
+  only when the splicer returns, and for most of the frame the outermost routine is DrawWorld: taking
+  what writers wrote at their return would end up reading the whole chain at DrawWorld's return.
+- So (decided with the user): the links come from the host's model of the splices. native_link.c hooks
+  the reservers (at entry; DrawMobysSetup at its exit; DrawTies_2's through TieProc's wrapper) and the
+  splicers (all their catalogued places: the catalogue files DmaTieTextures' level copies under
+  DmaShrubTextures' name), knows R, p and E from the chain pointer, and hands the three links to the host
+  list (uya_hl_link), checked against what the game wrote (only links that match are handed over).
+  Levels 3 and 5: every splice of the six kinds matches (0 differ).
+- sdk/hostlist.c: the list by address; the records' markers as the natives make them (uya_hl_put from
+  native_2d.c's rec_end and record), what a hooked writer wrote at its return (every qword of the range
+  it moved the chain pointer across: a parse of the tags loses step on the data they REF; the natives'
+  own packet buffers: ShrubProc, TieProc, MobyProc), first taking in a frame stands, host links always.
+  Check (UYA_HL=1): at each channel-1 send the list is followed from the chain's start as the DMAC
+  follows tags, compared item by item with the walker; UYA_HLFROM=v adds a census of the items it does
+  not hold by writer (dev/scripts/hl_census.sh "LEVELS", chain-watch tree).
+- recomp.py HOST_HOOKS_SCAN: the native hooks that did not call the return scan themselves get it around
+  them (particles, sky, shadow volumes, billboards, moby skinning, strips, the 2D ports).
+- What it took beyond the splices (each from the census): the moby shadows' splice (func_0020DEB0; its
+  slot D_00160040 is MobyProc's, which reports it; no shadows: the slot is left a CNT with nothing);
+  VU1_sendChain's END (handed over at its entry: the walk runs inside it), with the qwords the sender
+  wrote itself just before (FadeToBlack's fade REF: the run from the latest chain-pointer taking to the
+  chain pointer, at most 4 KB); the chain word from the sender's own references; func_L01_002BA380 (the
+  strips' entry list: its closing FLUSHA) hooked; a routine that leaves by a tail call (SkyDrawShellGouraud
+  into VU1_addGSregister) returns with the callee (the return scan pops the entries under it with the
+  same return address); the frame copy's twin closes its return scan; native_2d_tag hands the packet it
+  puts back to the list (a chain sent twice without being built again: FadeToBlack, transitions); the
+  return scan's "buffer in a0, size in v0" taking only for a size that is one (up to 64 KB: it was taking
+  megabytes where v0 is not a size, and hid what was missing).
+- Result (chain-watch tree, software, walking, UYA_HL=1): every channel-1 send from vsync ~350 to the end
+  (sends ~1200-1500 of each run) matches the walker item for item on all 19 levels: the order, the links,
+  the records' markers, the END. Every splice of the seven kinds matches the host's model (0 differ).
+- Not yet: the boot program's frames (vsyncs 16, 177-215): there the writers are the executable's
+  routines compiled from the decomp's C (SkyDrawShellGouraud, DrawWorld's exe copy, ...), which recomp
+  does not translate, so no hook reaches them. Next: let recomp translate a named set of them (their C
+  callers then call the translated routine through its wrapper) so the same hooks apply.
+- Checks (UYA_HL off: the extra return scans and conversions): GPU, levels 1, 3, 5, 9, 13, UYA_NSTAB=0
+  UYA_NUPL=0 vs default: 0 px; level 3 UYA_HL=1 vs default: 0 px (the list only watches); software, all
+  19 levels: 0 px (13 and 17 diverged in the parallel run, 0 px rerun alone); boot frames: 0 px. GPU
+  with UYA_HL=1, levels 3, 9, 12: every send from vsync 1000 matches the walker, every splice the model.
+
+## Step B: the boot program's frames (20 October)
+
+- The boot program's chain writers (census from vsync 0, chain-watch tree; pc2fn.py now maps the
+  executable's addresses, its C functions' thunks included): the sky's shells (SkyDrawShellGouraud
+  func_0022CC40, SkyDrawShellTextured func_0022CA00), func_00201AF0, func_00234F40, func_00232A00
+  (from space.c's func_00232EF0).
+- The two sky shells were the only C ones: decomp functions written with a label
+  (`func_X_r(...) __asm__("func_X")`) stayed C under the static recompilation, so no hook reached them.
+  gen_host.py STATIC_LABELLED: a named set of labelled C translated from the game's bytes like the rest.
+  Their other three writers were translated but not hooked: now the return scan's.
+- space.c's func_00232EF0 writes the fade REF itself between two hooked calls: the send now also takes
+  the short gaps (up to 4 KB) between consecutive chain-pointer takings since the last send.
+- The census records the list's item as the walker reads it (before a dispatch puts a packet back).
+- Result: every channel-1 send of the run, boot program included, matches the walker item for item on
+  all 19 levels (software, chain-watch tree: 0 of 1500 sends differ on each); GPU levels 0, 3, 9, 12, 16:
+  0 of 1200.
+- Checks: the boot program across builds (sky shells as C vs translated): software frames 150-400 0 px,
+  GPU recording of vsyncs 150-400 replayed 0 px; GPU A/B levels 1, 3, 5, 9, 13 (UYA_NSTAB=0 UYA_NUPL=0 vs
+  default) 0 px.
+  Software, all 19 levels (same settings): 0 px; boot frames: 0 px.
+
+## Step C: the frame drawn from the host list (20 October)
+
+- sdk/dma.c: the channel-1 walk takes each tag, and the data a CNT / NEXT / CALL / RET / END carries after
+  it, from the host draw list (uya_hl_draw), not from the game's memory; where a record's handler puts its
+  packet back and reads it again (2D, particles, mobys, transforms), the packet goes into the list first.
+  An item the list does not hold would be read from the game's memory, counted and logged (none in the
+  tests). REF'd data (state tables' snapshots, uploads) is still read where the DMA would read it.
+- First as UYA_HLDRAW=1 with the game's memory compared qword by qword: all 19 levels (software, from
+  boot): 0.38-1.06 million items a run read from the list, 0 not in it, 0 differing; GPU levels 6, 15 the
+  same. Pixels: software 19 levels and boot frames 0 px, GPU levels 1, 3, 9, 13 0 px.
+- Then the default (the walker of the game's memory removed from the frame's path): UYA_HL=0 keeps the
+  old walk for comparisons; UYA_HLCHECK=1 compares the game's memory with the list (and UYA_HLFROM's census).
+- Cost: on the GPU, a run of level 6 / 15 takes the same time with the list as without (about 15 s).
+- Checks of the default against UYA_HL=0: software, all 19 levels: 0 px (every run drew all its items from
+  the list, 0 not in it); boot frames 150-400: 0 px; GPU levels 1, 3, 5, 9, 13: 0 px.

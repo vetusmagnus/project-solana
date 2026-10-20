@@ -42,6 +42,8 @@ typedef struct { u32 at, end, q0[4]; u32 off, nq; u32 snap_addr, snap_off, snap_
 static Rec *rec; static u32 *ring;
 static u32 rec_next, ring_at;
 static unsigned long long n_made, n_drawn, n_unknown, n_back;
+int uya_hl_on(void);
+void uya_hl_put(u32 a);
 /* a record for the packet at [at, end): op 19 with material m and nv vertices w (8 words each);
  * flags as op 19's */
 static void record(u32 at, u32 end, const nd_material *m, const u32 *w, u32 nv, u32 flags)
@@ -61,6 +63,7 @@ static void record(u32 at, u32 end, const nd_material *m, const u32 *w, u32 nv, 
     memcpy(op + 4 + ND_QW * 4, w, (size_t)nv * 32);
     ring_at += nq;
     rc_sw(at, 0x20000000u); rc_sw(at + 4, end); rc_sw(at + 8, NATIVE_2D_MARK); rc_sw(at + 12, i);
+    if (uya_hl_on()) uya_hl_put(at);   /* (the marker into the host draw list as it is made) */
     n_made++;
 }
 /* a record of several op 19 blocks (a producer whose material changes inside its packet) */
@@ -113,6 +116,7 @@ static int rec_end(u32 at, u32 end)
     r->snap_addr = rb_snap_addr; r->snap_off = rb_snap_off; r->snap_n = rb_snap_n; r->upl = rb_upl; rb_upl = 0;
     for (int k = 0; k < 4; k++) r->q0[k] = M32(at + 4 * (u32)k);
     rc_sw(at, 0x20000000u); rc_sw(at + 4, end); rc_sw(at + 8, NATIVE_2D_MARK); rc_sw(at + 12, i);
+    if (uya_hl_on()) uya_hl_put(at);   /* (the marker into the host draw list as it is made) */
     n_made++;
     return 1;
 }
@@ -122,6 +126,7 @@ int native_2d_tag(const u32 *q, u32 t)
     if (!rec || rec[i].at != t) { if (n_unknown++ < 3) uya_log("native 2D: marker %u at %08X not known: skipped", q[3], t); return 0; }
     Rec *r = &rec[i];
     for (int k = 0; k < 4; k++) rc_sw(t + 4 * (u32)k, r->q0[k]);
+    if (uya_hl_on()) uya_hl_put(t);   /* (the packet put back: the host draw list has it too, for a chain sent again) */
     r->at = 0;
     if (r->snap_n && memcmp(ring + (size_t)r->snap_off * 4, (const void *)RC_A(r->snap_addr), (size_t)r->snap_n * 16)) { n_back++; return 2; }   /* (changed since: the packet as GIF data) */
     extern const char *uya_gs_src; uya_gs_src = "native 2D";
@@ -650,7 +655,7 @@ static int dk_build(RcCtx *c, u32 dims, u32 T, int write)
     }
     return 1;
 }
-int uya_darkpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int darkpass_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     (void)g; (void)ng;
     int md = n2d_mode();
@@ -665,7 +670,7 @@ int uya_darkpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     dk_build(c, dims, T, 1);
     return 1;
 }
-void uya_darkpass_exit(RcCtx *c)
+static void darkpass_exit_(RcCtx *c)
 {
     (void)c;
     if (!dk_chk) return;
@@ -838,7 +843,7 @@ static int bl_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na, u32 qw
 int uya_blurpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { return bl_enter(c, g, ng, a, na, 0x26); }
 int uya_blurpass2_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { return bl_enter(c, g, ng, a, na, 0x29); }
 void uya_blurpass_exit(RcCtx *c) { uya_texdma_exit(c); }
-void uya_blurpass2_exit(RcCtx *c) { (void)c; }
+void uya_blurpass2_exit(RcCtx *c) { uya_texdma_exit(c); }   /* (bl_enter opened the return scan for both) */
 
 /* ---- the GS state helpers: VU1_addGSregister func_00234C98, VU1_setScissor func_00234D58 ----
  * Each writes one register as a packet (a CNT 2 with DIRECT 2, an A+D GIF tag, the value and the
@@ -1503,13 +1508,42 @@ void uya_stab_at(u32 T)
     u32 E = T + 16 * ((M32(T) & 0xFFFF) + 1);
     if (stab_one(T, E, 0)) { if (stab_one(T, E, 1)) st_made++; else st_other++; }
 }
+static void texdma_scan(RcCtx *c, int d, u32 ra);
+static void texdma_take(RcCtx *c, int d, u32 ra);
+int uya_hl_on(void);
+void uya_hl_take(u32 T, u32 E);
 void uya_texdma_exit(RcCtx *c)
 {
     u32 ra = (u32)c->r[31].d[0];
     int d = up_depth - 1;
     while (d >= 0 && up_ra[d] != ra) d--;
     if (d < 0) return;
-    up_depth = d; up_exits++;
+    /* entries below it with the same return address: routines that left by a tail call into this one
+     * (SkyDrawShellGouraud into VU1_addGSregister): they return now too */
+    int lo = d;
+    while (lo > 0 && up_ra[lo - 1] == ra) lo--;
+    up_depth = lo; up_exits++;
+    for (int e_ = d; e_ >= lo; e_--) texdma_take(c, e_, ra);
+}
+static void texdma_take(RcCtx *c, int d, u32 ra)
+{
+    texdma_scan(c, d, ra);
+    /* the host draw list (sdk/hostlist.c): the region this writer moved the chain pointer across, its items as they are now */
+    if (uya_hl_on()) {
+        int took = 0;
+        {   /* testing (UYA_HLDBG): the chain words at a return that meets the range */
+            int uya_hl_dbg(u32, u32); int hit = 0;
+            for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]), b = up_t0[d][k]; if (uya_hl_dbg(b < e ? b : e, b < e ? e : b + 16)) hit = 1; }
+            if (hit) uya_log("HLDBG return ra %08X (a0 %08X v0 %08X): words %08X->%08X %08X->%08X %08X->%08X", ra, up_buf[d], (u32)c->r[2].d[0], up_t0[d][0], M32(up_cws[0]), up_t0[d][1], M32(up_cws[1]), up_t0[d][2], M32(up_cws[2]));
+        }
+        void uya_hl_take_chain(u32 T, u32 E);
+        for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]), b = up_t0[d][k]; if (e > b && e - b < 0x100000u && !(b & 15) && chain_word_ok(up_cws[k])) { uya_hl_take_chain(b, e); took = 1; } }
+        /* (the buffer given in a0, its size returned in v0: only a size that is one, a small buffer) */
+        if (!took) { u32 b = up_buf[d], sz = (u32)c->r[2].d[0]; if (b >= 0x100000u && !(b & 15) && sz && !(sz & 15) && sz <= 0x10000u && b + sz <= 0x2000000u) uya_hl_take(b, b + sz); }
+    }
+}
+static void texdma_scan(RcCtx *c, int d, u32 ra)
+{
     if (!nupl_on() && !nstab_on()) return;
     static int tdlog = -1; if (tdlog < 0) { const char *e_ = getenv("UYA_TDLOG"); tdlog = e_ ? atoi(e_) : 0; }   /* (testing: UYA_TDLOG=n logs n returns' scans) */
     u32 cw = 0, T = 0;
@@ -1550,3 +1584,14 @@ void uya_texdma_exit(RcCtx *c)
     if (up_made >= next) { next = next < 100000 ? next * 10 : next + 100000; uya_log("native texture uploads: %llu as host records, %llu other packets", up_made, up_other); }
     if (st_made >= snext) { snext = snext < 100000 ? snext * 10 : snext + 100000; uya_log("native GS state tables: %llu as host records, %llu not made", st_made, st_other); }
 }
+
+/* the darkening pass with the return scan around it (its items into the host draw list) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+int uya_darkpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = darkpass_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_darkpass_exit(RcCtx *c) { darkpass_exit_(c); uya_texdma_exit(c); }

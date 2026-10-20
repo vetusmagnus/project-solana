@@ -657,3 +657,29 @@ C. The walker removed; the DMA interrupt the game's chain sync waits on becomes 
 - So for the GPU renderer step A ends with those leftovers; the VU-fed data is the software
   renderer's path only (its clip parts through the VU programs' native code), a question for whether
   the walker should also go from the software (reference) renderer.
+
+## Step A, the GPU leftovers (19 October)
+
+- What was left (GPU traces, vsync 1450, before): ShrubProc's own heads (CNT 2 + DIRECT: TEST_1
+  0x530CB / 0x5320B, copied from its head / close / second head into its packets through the
+  scratchpad, so never in a scan of the chain word); level 6 and 17's CNT 5 packets (func_001F84AC:
+  a REGLIST GIF tag, CLAMP_1 and TEX0_1 two a qword, then A+D TEX1_1, ALPHA_1); writers not hooked:
+  func_L01_002BA898 (REF 7 to 0x1CAF00, TEST/CLAMP/TEX1; CNT 5 ALPHA_1/2), func_L09_0021E770,
+  func_L09_0021E410 (CNT 6 A+D TEX0 and the transfer's registers, then a REF of 1025 qwords whose data
+  is the IMAGE tag and the image), func_L02_002A58C0 (FOGCOL), func_L05_0030EB40 (CNT 5 ALPHA_1/2,
+  copied into the chain by func_L00_002CE6A0).
+- native_2d.c: stab_parse also takes PACKED registers that are their 64-bit value (TEX0, CLAMP of either
+  context) and REGLIST tags of those registers; upl_ref_image: a REF whose data is an IMAGE tag and its
+  image becomes an upload record (the data read at the marker, op 22); uya_stab_at(T): a CNT table a
+  native module copied, converted where it is (ShrubProc: its three heads, after run).
+- The natives (ShrubProc, TieProc, the stripb routines) are wrapped with the return scan too
+  (uya_texdma_enter / exit around their hooks).
+- build.py: UYA_SKIPGEN=0 now means off (it was any value: a "full" Windows build with UYA_SKIPGEN=0
+  kept the old generated code, so the new hooks were missing there).
+- Testing aids: UYA_TDLOG=n logs n return scans (return address, chain word, range); dev/scripts/
+  wt_direct.sh "LEVELS" counts the DIRECT packets in a GPU walk trace, by tag and writer.
+- After: GPU traces (vsync 1450), levels 0-18: 0 DIRECT packets on every level. The chain on the GPU now
+  carries only markers, NEXT / CNT 0 links and the natives' own records.
+- Checks: GPU (Windows build), levels 1, 3, 5, 6, 9, 13, UYA_NSTAB=0 UYA_NUPL=0 vs default: 0 px;
+  software, all 19 levels, the same settings: 0 px (levels 5, 7, 12, 17 differed by millions of pixels in
+  the parallel run, 0 px each rerun alone); boot frames (level 3, vsyncs 170-400): 0 px.

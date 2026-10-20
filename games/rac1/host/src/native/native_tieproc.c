@@ -912,7 +912,7 @@ static void put_back(const typeof(A) *s, u32 gp)
 static TieRefs chk_R;
 static u32 chk_ncls;
 
-int uya_tieproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int tieproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     if (mode_ < 0) { const char *e = getenv("UYA_NTIEPROC"), *n = getenv("UYA_NATIVE"); mode_ = e ? atoi(e) : (n && !atoi(n)) ? 0 : 2; uya_log("native TieProc: %s", mode_ == 0 ? "off (the game's routine)" : mode_ == 1 ? "check against the game's routine" : mode_ == 3 ? "on, the draws into the chain" : "on, the draws direct"); }
     if (!mode_) return 0;
@@ -936,7 +936,7 @@ int uya_tieproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     return 0;
 }
 
-void uya_tieproc_exit(RcCtx *c)
+static void tieproc_exit_(RcCtx *c)
 {
     (void)c;
     if (mode_ != 1 || !N.valid) return;
@@ -970,3 +970,16 @@ void uya_tieproc_exit(RcCtx *c)
                 n_runs, n_ok, n_bad, st_inst, st_retry, st_occl, st_far, st_near, st_side, st_cross, st_box, st_guard,
                 st_lod[0], st_lod[1], st_lod[2], st_lod[3], st_clip, st_clipfull, st_pass2, st_sway, st_swayfar, st_skip);
 }
+
+/* (the packets this module writes into the chain itself, GS state among them: the uploads' and state
+ * tables' return scan over them, native_2d.c) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
+int uya_tieproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = tieproc_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_tieproc_exit(RcCtx *c) { tieproc_exit_(c); uya_texdma_exit(c); }

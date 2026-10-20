@@ -104,7 +104,13 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_0022CC40": "uya_texdma",       # the sky's setup (Gouraud)
               "func_001FB498": "uya_texdma",       # PutDrawBufferLarge
               "func_001FB598": "uya_texdma",       # PutDrawBufferSmall
-              "func_001F3C10": "uya_texdma"}       # the frame's tables        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+              "func_001F3C10": "uya_texdma",       # the frame's tables
+              "func_001F84AC": "uya_texdma",       # the fogged quads' setup (PACKED CLAMP, TEX0; TEX1, ALPHA)
+              "func_L01_002BA898": "uya_texdma",   # a strip setup's tables (level 1)
+              "func_L09_0021E770": "uya_texdma",   # a table (level 9)
+              "func_L09_0021E410": "uya_texdma",   # an animated texture's setup and upload (level 9)
+              "func_L02_002A58C0": "uya_texdma",   # FOGCOL (levels 2, 9)
+              "func_L05_0030EB40": "uya_texdma"}   # ALPHA_1 / ALPHA_2, copied into the chain (level 5)        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
 HOST_HOOKS_ALLREFS = {"uya_hudsprite", "uya_hudflip", "uya_clearref", "uya_addgsreg", "uya_setscissor", "uya_stencilclr", "uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",

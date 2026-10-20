@@ -1410,15 +1410,35 @@ static int stab_parse(u32 tb, u32 qwc, int write)
         u64 lo = M64(tb + 16 * q), hi = M64(tb + 16 * q + 8);
         u32 nl = (u32)(lo & 0x7FFF), nreg = (u32)(lo >> 60) & 15, flg = (u32)(lo >> 58) & 3;
         if (!nreg) nreg = 16;
+        if (flg == 1 && !((lo >> 46) & 1) && !(lo & 0x03FF7FFF0000ull)) {   /* REGLIST: the values two a qword */
+            for (u32 k = 0; k < nreg; k++) { u32 r_ = (u32)(hi >> (4 * k)) & 15; if (r_ < 6 || r_ > 9) return 0; }
+            u32 n = nl * nreg, nq = (n + 1) / 2;
+            if (!n || q + 1 + nq > qwc || n > 64) return 0;
+            if (write) {
+                u32 op[4] = { 3, 0, 0, 0 }; rec_raw(op);
+                for (u32 k = 0; k < n; k++) {
+                    u32 ad_ = (u32)(hi >> (4 * (k % nreg))) & 15; u64 va_ = M64(tb + 16 * (q + 1) + 8 * k);
+                    u32 o = ring_at;
+                    if (ring_at + 64 > R_QW) { rb_ok = 0; return 0; }
+                    if (nd_pack_regs(&ad_, &va_, 1, ring, &o, R_QW)) { ring_at = o; continue; }
+                    op[0] = 1; op[1] = ad_; op[2] = (u32)va_; op[3] = (u32)(va_ >> 32); rec_raw(op);
+                }
+            }
+            q += 1 + nq; continue;
+        }
         if (flg != 0 || ((lo >> 46) & 1) || (lo & 0x03FF7FFF0000ull)) return 0;   /* (PACKED, no PRE, nothing else in the tag) */
-        for (u32 k = 0; k < nreg; k++) if (((hi >> (4 * k)) & 15) != 0xE) return 0;
+        /* A+D, or a register whose PACKED form is its 64-bit value (TEX0, CLAMP of either context) */
+        for (u32 k = 0; k < nreg; k++) { u32 r_ = (u32)(hi >> (4 * k)) & 15; if (r_ != 0xE && r_ != 6 && r_ != 7 && r_ != 8 && r_ != 9) return 0; }
         u32 n = nl * nreg;
         if (q + 1 + n > qwc || n > 64) return 0;
         if (write) {
             u32 op[4] = { 3, 0, 0, 0 };
             rec_raw(op);
             u32 ad[64]; u64 va[64];
-            for (u32 k = 0; k < n; k++) { va[k] = M64(tb + 16 * (q + 1 + k)); ad[k] = (u32)M64(tb + 16 * (q + 1 + k) + 8) & 0xFF; }
+            for (u32 k = 0; k < n; k++) {
+                u32 r_ = (u32)(hi >> (4 * (k % nreg))) & 15;
+                va[k] = M64(tb + 16 * (q + 1 + k)); ad[k] = r_ == 0xE ? (u32)M64(tb + 16 * (q + 1 + k) + 8) & 0xFF : r_;
+            }
             /* runs of writes as settings where they are; the others as register writes, in order */
             u32 k = 0;
             while (k < n) {
@@ -1434,6 +1454,24 @@ static int stab_parse(u32 tb, u32 qwc, int write)
 }
 /* the VIF word before the DIRECT: a NOP or a flush (FLUSHE, FLUSH, FLUSHA: waits only, nothing here) */
 static int vif_wait_only(u32 w) { return w == 0 || w == 0x10000000u || w == 0x11000000u || w == 0x13000000u; }
+/* a REF whose data is an IMAGE packet (its tag, then the image): 1 if so, its record (the tag's Q reset,
+ * the image as a host upload's data, read at the marker) made when write */
+static int upl_ref_image(u32 T, u32 E, int write)
+{
+    u32 tag = M32(T), qwc = tag & 0xFFFF;
+    if ((tag & 0xFFFF0000u) != 0x30000000u || qwc < 2 || !vif_wait_only(M32(T + 8)) || M32(T + 12) != (0x50000000u | qwc) || T + 16 > E) return 0;
+    u32 src = M32(T + 4);
+    if (src < 0x100000u || src + qwc * 16 > 0x2000000u || (src & 15)) return 0;
+    u64 it = M64(src), ih = M64(src + 8);
+    if ((it & ~0x7FFFull & ~0x8000ull) != (2ull << 58) || ih || (u32)(it & 0x7FFF) + 1 != qwc) return 0;
+    if (!write) return 1;
+    if (ring_at + 16 > R_QW) ring_at = 0;
+    rec_begin();
+    u32 op[4] = { 3, 0, 0, 0 }; rec_raw(op);
+    op[0] = 22; op[1] = qwc - 1; op[2] = src + 16; op[3] = 0; rec_raw(op);
+    rb_upl = 1;
+    return rec_end(T, T + 16);
+}
 /* the REF (or CNT) at T: 1 if it sends such a table (its record made when write) */
 static int stab_one(u32 T, u32 E, int write)
 {
@@ -1458,6 +1496,13 @@ static int stab_one(u32 T, u32 E, int write)
     rec_snapshot(tb, qwc);
     return rec_end(T, T + 16);
 }
+/* a CNT table a native module copies into its own packets (ShrubProc's heads): converted where it is, at its return */
+void uya_stab_at(u32 T)
+{
+    if (!nstab_on() || (M32(T) >> 28 & 7) != 1) return;
+    u32 E = T + 16 * ((M32(T) & 0xFFFF) + 1);
+    if (stab_one(T, E, 0)) { if (stab_one(T, E, 1)) st_made++; else st_other++; }
+}
 void uya_texdma_exit(RcCtx *c)
 {
     u32 ra = (u32)c->r[31].d[0];
@@ -1466,8 +1511,10 @@ void uya_texdma_exit(RcCtx *c)
     if (d < 0) return;
     up_depth = d; up_exits++;
     if (!nupl_on() && !nstab_on()) return;
+    static int tdlog = -1; if (tdlog < 0) { const char *e_ = getenv("UYA_TDLOG"); tdlog = e_ ? atoi(e_) : 0; }   /* (testing: UYA_TDLOG=n logs n returns' scans) */
     u32 cw = 0, T = 0;
-    for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]); if (e > up_t0[d][k] && e - up_t0[d][k] < 0x100000u && !(up_t0[d][k] & 15) && chain_word_ok(up_cws[k])) { if (cw) return; cw = up_cws[k]; T = up_t0[d][k]; } }
+    for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]); if (e > up_t0[d][k] && e - up_t0[d][k] < 0x100000u && !(up_t0[d][k] & 15) && chain_word_ok(up_cws[k])) { if (cw) { if (tdlog > 0) { tdlog--; uya_log("TDLOG ra %08X: two chain words moved", ra); } return; } cw = up_cws[k]; T = up_t0[d][k]; } }
+    if (tdlog > 0) { tdlog--; uya_log("TDLOG ra %08X: chain word %08X from %08X to %08X (a0 %08X v0 %08X)", ra, cw, T, cw ? M32(cw) : 0, up_buf[d], (u32)c->r[2].d[0]); }
     u32 E = cw ? M32(cw) : 0;
     if (!cw) {   /* (the chain pointer not moved: the routine built into the buffer given in a0, its size returned) */
         u32 b = up_buf[d], sz = (u32)c->r[2].d[0];
@@ -1492,10 +1539,11 @@ void uya_texdma_exit(RcCtx *c)
         }
         if ((tag >> 28 & 7) == 3) {
             if (nstab_on() && stab_one(T, E, 0)) { if (stab_one(T, E, 1)) st_made++; else st_other++; T += 16; continue; }
+            if (nupl_on() && upl_ref_image(T, E, 0)) { if (upl_ref_image(T, E, 1)) up_made++; else up_other++; T += 16; continue; }
             T += 16; up_other++; continue;   /* (a REF of another kind) */
         }
         if ((tag >> 28 & 7) == 2 && (tag & 0xFFFF) == 0) { T += 16; continue; }   /* (a NEXT: the packets written after it are converted where they are) */
-        { static int t; if (t < 3) { t++; uya_log("native texture uploads: tag %08X %08X %08X %08X at %08X: the rest as it is", tag, M32(T + 4), M32(T + 8), M32(T + 12), T); } }
+        { static int t; if (t < 3 || tdlog > 0) { t++; uya_log("native texture uploads: tag %08X %08X %08X %08X at %08X: the rest as it is", tag, M32(T + 4), M32(T + 8), M32(T + 12), T); } }
         break;
     }
     static unsigned long long next = 1, snext = 1;

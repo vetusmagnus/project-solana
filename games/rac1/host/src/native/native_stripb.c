@@ -2065,7 +2065,7 @@ static Chk *chk_start(int rt, RcCtx *c, u32 chainvar)
 }
 
 /* ---- func_L01_0021F9C8 ---- */
-int uya_stripb_f9c8_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_f9c8_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_F9C8][lv_now()]++;
@@ -2079,10 +2079,10 @@ int uya_stripb_f9c8_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_f9c8_exit(RcCtx *c) { check_exit(&chk[RT_F9C8], c); }
+static void stripb_f9c8_exit_(RcCtx *c) { check_exit(&chk[RT_F9C8], c); }
 
 /* ---- func_L01_002BA150 ---- */
-int uya_stripb_ba150_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_ba150_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_BA150][lv_now()]++;
@@ -2103,10 +2103,10 @@ int uya_stripb_ba150_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_ba150_exit(RcCtx *c) { check_exit(&chk[RT_BA150], c); }
+static void stripb_ba150_exit_(RcCtx *c) { check_exit(&chk[RT_BA150], c); }
 
 /* ---- func_L02_00250A58 ---- */
-int uya_stripb_50a58_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_50a58_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_50A58][lv_now()]++;
@@ -2121,10 +2121,10 @@ int uya_stripb_50a58_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_50a58_exit(RcCtx *c) { check_exit(&chk[RT_50A58], c); }
+static void stripb_50a58_exit_(RcCtx *c) { check_exit(&chk[RT_50A58], c); }
 
 /* ---- func_L02_002A52D0 ---- */
-int uya_stripb_a52d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_a52d0_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_A52D0][lv_now()]++;
@@ -2148,10 +2148,10 @@ int uya_stripb_a52d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_a52d0_exit(RcCtx *c) { check_exit(&chk[RT_A52D0], c); }
+static void stripb_a52d0_exit_(RcCtx *c) { check_exit(&chk[RT_A52D0], c); }
 
 /* ---- func_L06_00216B38 ---- */
-int uya_stripb_16b38_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_16b38_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_16B38][lv_now()]++;
@@ -2166,10 +2166,10 @@ int uya_stripb_16b38_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_16b38_exit(RcCtx *c) { check_exit(&chk[RT_16B38], c); }
+static void stripb_16b38_exit_(RcCtx *c) { check_exit(&chk[RT_16B38], c); }
 
 /* ---- func_L09_002C2B08 ---- */
-int uya_stripb_c2b08_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_c2b08_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_C2B08][lv_now()]++;
@@ -2191,10 +2191,10 @@ int uya_stripb_c2b08_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_c2b08_exit(RcCtx *c) { check_exit(&chk[RT_C2B08], c); }
+static void stripb_c2b08_exit_(RcCtx *c) { check_exit(&chk[RT_C2B08], c); }
 
 /* ---- func_L12_002BD3D0 ---- */
-int uya_stripb_bd3d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+static int stripb_bd3d0_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     get_mode();
     cen_calls[RT_BD3D0][lv_now()]++;
@@ -2217,7 +2217,7 @@ int uya_stripb_bd3d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     check_native_done(k, c);
     return 0;
 }
-void uya_stripb_bd3d0_exit(RcCtx *c) { check_exit(&chk[RT_BD3D0], c); }
+static void stripb_bd3d0_exit_(RcCtx *c) { check_exit(&chk[RT_BD3D0], c); }
 
 /* ---- level 1's strip pair, func_L01_00263338 (a0: the program's start / 8, a1: the entry) ----
  * Writes two 46-vertex strips at the chain pointer (gp, its only gp reference, three times): the first
@@ -2259,3 +2259,64 @@ void uya_stripl1_exit(RcCtx *c)
     native_stripd_sem(b1, b2, n, (const u32 *)RC_A(b1 + 0x10), (const u32 *)RC_A(b1 + 0x24), st2, col1, xyz1, 0, pc);
     native_stripd_end(l1_s0, l1_cw, c0, end);
 }
+
+/* (the packets this module writes into the chain itself, GS state among them: the uploads' and state
+ * tables' return scan over them, native_2d.c) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
+int uya_stripb_f9c8_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_f9c8_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_f9c8_exit(RcCtx *c) { stripb_f9c8_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_ba150_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_ba150_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_ba150_exit(RcCtx *c) { stripb_ba150_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_50a58_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_50a58_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_50a58_exit(RcCtx *c) { stripb_50a58_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_a52d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_a52d0_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_a52d0_exit(RcCtx *c) { stripb_a52d0_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_16b38_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_16b38_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_16b38_exit(RcCtx *c) { stripb_16b38_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_c2b08_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_c2b08_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_c2b08_exit(RcCtx *c) { stripb_c2b08_exit_(c); uya_texdma_exit(c); }
+int uya_stripb_bd3d0_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = stripb_bd3d0_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_stripb_bd3d0_exit(RcCtx *c) { stripb_bd3d0_exit_(c); uya_texdma_exit(c); }

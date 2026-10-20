@@ -121,7 +121,7 @@ def progress(phase, i, n):
     print("[progress] %s %d %d" % (phase, i, n), flush=True)
 # UYA_SKIPGEN=1 (testing): the generated code of the last build as it is, only the host sources compiled
 # again (for a change to host/src alone; a hook list or recompiler change needs the full build)
-if os.environ.get("UYA_SKIPGEN") and os.path.isdir(gen):
+if os.environ.get("UYA_SKIPGEN", "0") not in ("", "0") and os.path.isdir(gen):
     level_info = [("%02d" % lv, 0, 0, 0) for lv in levels]
 else:
     shutil.rmtree(stage, ignore_errors=True)

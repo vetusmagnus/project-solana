@@ -446,6 +446,7 @@ static void sway(u32 at, u32 a3, u64 a0h)
  * NOP and DIRECT) */
 static int dbb;
 static u32 gb[4096][4], gbn;
+static u32 hd_at[4]; static int hd_n;   /* (where run copied the heads: their GS settings converted at the return) */
 static void gb_put(const void *q) { if (gbn < 4096) memcpy(gb[gbn++], q, 16); }
 static void gb_flush(void) { if (gbn) native_shrub_seg_gif((const u32 (*)[4])gb, gbn); gbn = 0; }
 static int cnt_direct(const u32 *w, u32 n) { return w[0] == (0x10000000u | n) && w[1] == 0 && w[2] == 0 && w[3] == (0x50000000u | n); }
@@ -515,6 +516,7 @@ static void run(RcCtx *c, const ShRefs *R)
     }
     rc_sw(SPR + 0x3F90, fp);
     fp += 0x10; sq_(sp, &ZQ); sp += 0x10;
+    hd_at[hd_n++] = fp;
     copyq(R->head, 3, &sp, &fp, &v0h, &v1h, &a0h);
 
     /* the classes */
@@ -749,6 +751,7 @@ static void run(RcCtx *c, const ShRefs *R)
     }
 
     /* the fading part */
+    hd_at[hd_n++] = fp;
     copyq(R->close, 3, &sp, &fp, &v0h, &v1h, &a0h);
     seg_open = 0;
     {
@@ -910,6 +913,7 @@ static void run(RcCtx *c, const ShRefs *R)
             sp = (sp - at) ^ 0x800;
         }
     }
+    if (hd_n < 4) hd_at[hd_n++] = fp;
     copyq(R->head2, 3, &sp, &fp, &v0h, &v1h, &a0h);
     int clip = M32(SPR + 0x3F74) != SPR + 0x3D00;
     if (clip) {
@@ -1058,7 +1062,8 @@ static void put_back(const typeof(A) *s, u32 gp)
 static ShRefs chk_R;
 static u32 chk_ncls;
 
-int uya_shrubproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+void uya_stab_at(u32 T);
+static int shrubproc_enter_(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
 {
     if (dec_test < 0) dec_test = getenv("UYA_SHRUBDEC") != 0;
     if (mode_ < 0) { const char *e = getenv("UYA_NSHRUBPROC"), *n = getenv("UYA_NATIVE"); mode_ = e ? atoi(e) : (n && !atoi(n)) ? 0 : 2; uya_log("native ShrubProc: %s", mode_ == 0 ? "off (the game's routine)" : mode_ == 1 ? "check against the game's routine" : "on"); }
@@ -1067,7 +1072,9 @@ int uya_shrubproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     ShRefs R = refs_of(g, a);
     if (mode_ >= 2) {
         direct = mode_ == 2;
+        hd_n = 0;
         run(c, &R);
+        for (int k = 0; k < hd_n; k++) uya_stab_at(hd_at[k]);   /* (the heads' GS settings as host records: native_2d.c) */
         { static unsigned long long nr; if (direct && ++nr % 300 == 0) uya_log("native ShrubProc: %llu runs; the main and fading parts direct %llu, in the chain %llu", nr, st_ddirect, st_dchain); }
         return 1;
     }
@@ -1087,7 +1094,7 @@ int uya_shrubproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
     return 0;
 }
 
-void uya_shrubproc_exit(RcCtx *c)
+static void shrubproc_exit_(RcCtx *c)
 {
     (void)c;
     if (mode_ != 1 || !N.valid) return;
@@ -1137,3 +1144,16 @@ void uya_shrubproc_exit(RcCtx *c)
                 n_runs, n_ok, n_bad, st_inst, st_retry, st_far, st_near, st_side, st_clip, st_clipfull, st_clipdraw, st_bb, st_bbpart, st_bbfull,
                 st_bbdraw[0], st_bbdraw[1], st_plain, st_plainfull, st_fade, st_fadefull, st_sway, st_swayfar, st_skip, st_empty);
 }
+
+/* (the packets this module writes into the chain itself, GS state among them: the uploads' and state
+ * tables' return scan over them, native_2d.c) */
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
+int uya_shrubproc_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na)
+{
+    uya_texdma_enter(c, g, ng, a, na);
+    int r = shrubproc_enter_(c, g, ng, a, na);
+    if (r) uya_texdma_exit(c);
+    return r;
+}
+void uya_shrubproc_exit(RcCtx *c) { shrubproc_exit_(c); uya_texdma_exit(c); }

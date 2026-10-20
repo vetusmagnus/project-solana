@@ -616,3 +616,29 @@ B. A host list mirroring the links: each producer appends its records to its sub
    against the walker's trace, item by item, each frame.
 C. The walker removed; the DMA interrupt the game's chain sync waits on becomes a host event (frame
    submitted).
+
+## Step A, first part: the GS state tables as records (19 October, night)
+
+- The 64 REF + DIRECT packets of the traced frame (level 3, vsync 1450; UYA_WALKTRACE now names each
+  tag's writer in the chain-watch tree): 42 the shadows' per-volume setup (func_00228458, 3 qwords at
+  0x1BC300, after a FLUSHA), 15 the texture flushes (the look-alikes the levels catalogue as
+  func_001FB848, at 0x28E880 / 0x28E940), 3 the sky's setup blocks (func_0022CA00, func_0022CC40), 2 the
+  draw buffers' setups (func_001FB498, func_001FB598), 2 the frame's tables (func_001F3C10), 1 the
+  shadows' setup (func_00228860).
+- native_2d.c (UYA_NSTAB, 0: the game's packets): a REF, or a CNT, with DIRECT (after a NOP or a flush,
+  which only waits) whose table is A+D GIF tags only becomes, at its writer's return, a marker and a
+  record: the register writes as host settings (ops 17 / 18 where they are a material or pass
+  settings, op 1 otherwise, each tag's Q reset op 3); a REF's table kept and compared again at the
+  marker (changed: GIF data). The writers above are hooked with the uploads' return scan
+  (uya_texdma); the flushes through the frame copy's hook, on every place.
+- The traced frame after: no REF with GIF data; 5 CNT + DIRECT packets of one texture flush, written by
+  the native shrub, tie and strip code itself between its records (to convert in those modules). Level
+  3: 0 px against UYA_NSTAB=0.
+- Checks: software, all 19 levels, UYA_NSTAB=0 vs default: 0 px (many levels differed in the parallel
+  run with a Windows build compiling alongside; all 0 px alone); boot frames 0 px; GPU (Windows build),
+  levels 1, 3, 9, 13: 0 px.
+- Other levels, one frame each (vsync 1450): DIRECT packets left per frame: level 1 10, 6 16, 9 13,
+  13 5, 17 14: the native code's own texture flushes (CNT 2), on levels 6 and 17 10-12 CNT 5 packets
+  not identified yet, and a few REF tables from writers not hooked yet (levels 1: 0x1CAF00 7 qwords;
+  9: 0x16EB20 9, 0x1CB6F0 3; 13: 0x1CAD80 7). And the VU-fed producers' data: 211-757 UNPACK and
+  77-272 MSCAL packets a frame: step A's second part, the larger one.

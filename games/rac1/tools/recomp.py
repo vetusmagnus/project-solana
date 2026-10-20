@@ -96,7 +96,15 @@ HOST_HOOKS = {"func_002352C8": "uya_tfragproc",     # TfragProc (native_tfragpro
               "func_001F4748": "uya_texdma",       # the frame's upload list
               "func_0022C870": "uya_texdma",       # the sky's pager and its uploads
               "func_0020C2F8": "uya_texdma",       # the upload list's sender, the executable's copy (the boot screens)
-              "func_00236060": "uya_texdma"}       # BuildTfragTextureDma, the executable's copy        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
+              "func_00236060": "uya_texdma",       # BuildTfragTextureDma, the executable's copy
+              # the GS state tables sent by REF: converted at the writer's return (native_2d.c stab_one)
+              "func_00228458": "uya_texdma",       # the shadows' per-volume setup
+              "func_00228860": "uya_texdma",       # the shadows' setup
+              "func_0022CA00": "uya_texdma",       # the sky's setup (textured)
+              "func_0022CC40": "uya_texdma",       # the sky's setup (Gouraud)
+              "func_001FB498": "uya_texdma",       # PutDrawBufferLarge
+              "func_001FB598": "uya_texdma",       # PutDrawBufferSmall
+              "func_001F3C10": "uya_texdma"}       # the frame's tables        # fogged fans in perspective (native_2d.c; asm)   # a fogged, textured quad in perspective (native_2d.c; level code)       # level 1's pair of 46-vertex strips (native_stripb.c)  # the entry list of double strips (native_stripb.c)
 # hooks whose data references include every gp access (lwc1/swc1 and `addiu rt, $gp, k` too) and
 # every lui with the first addiu, load or store that uses it as a base (any destination, next 4 words)
 HOST_HOOKS_ALLREFS = {"uya_hudsprite", "uya_hudflip", "uya_clearref", "uya_addgsreg", "uya_setscissor", "uya_stencilclr", "uya_blurpass", "uya_blurpass2", "uya_billboards", "uya_darkpass", "uya_dtquad", "uya_stripl1", "uya_stripsetup", "uya_strip", "uya_striplist", "uya_stripb_f9c8", "uya_stripb_ba150", "uya_stripb_50a58",

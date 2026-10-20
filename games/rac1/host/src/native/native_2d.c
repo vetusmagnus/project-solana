@@ -811,8 +811,11 @@ static int bl_parse(u32 tb, u32 qwc, int write)
     }
     return 1;
 }
+int uya_texdma_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na);
+void uya_texdma_exit(RcCtx *c);
 static int bl_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na, u32 qwc)
 {
+    uya_texdma_enter(c, g, ng, a, na);   /* (the look-alikes the levels catalogue as this routine, VU1_texFlush among them: their REFs at their return) */
     int md = n2d_mode();
     if (md != 2) return 0;
     /* the chain word and the table (absolute), the second chain pointer (gp: the routine leaves it the new pointer too) */
@@ -834,7 +837,7 @@ static int bl_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na, u32 qw
 }
 int uya_blurpass_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { return bl_enter(c, g, ng, a, na, 0x26); }
 int uya_blurpass2_enter(RcCtx *c, const s32 *g, int ng, const u32 *a, int na) { return bl_enter(c, g, ng, a, na, 0x29); }
-void uya_blurpass_exit(RcCtx *c) { (void)c; }
+void uya_blurpass_exit(RcCtx *c) { uya_texdma_exit(c); }
 void uya_blurpass2_exit(RcCtx *c) { (void)c; }
 
 /* ---- the GS state helpers: VU1_addGSregister func_00234C98, VU1_setScissor func_00234D58 ----
@@ -1390,6 +1393,71 @@ static int upl_one(u32 T, u32 E, u32 *next, int write)
     rb_upl = 1;
     return rec_end(T, R + 16);
 }
+/* ---- the GS state tables sent by REF (step A of the host draw list) ----
+ * A REF with DIRECT whose table is A+D GIF tags only (the shadows' per-volume setup, the texture flushes,
+ * the sky's setup blocks, the draw buffers' setups, the frame's tables): its place a marker, the record
+ * the table's register writes as host settings (ops 17 and 18 where they are a material or pass
+ * settings, op 1 otherwise; each tag's Q reset, op 3), the table kept with it and compared again where
+ * the chain meets the marker (changed: the packet as GIF data). UYA_NSTAB=0: the game's packets. */
+static int stab_mode = -1;
+static int nstab_on(void) { if (stab_mode < 0) { const char *e = getenv("UYA_NSTAB"); stab_mode = e ? atoi(e) != 0 : nupl_on(); uya_log("native GS state tables: %s (UYA_NSTAB)", stab_mode ? "host records" : "the game's packets"); } return stab_mode; }
+static unsigned long long st_made, st_other;
+/* the table at tb (qwc qwords): 1 if it is A+D GIF tags only; its record's ops made when write */
+static int stab_parse(u32 tb, u32 qwc, int write)
+{
+    u32 q = 0;
+    while (q < qwc) {
+        u64 lo = M64(tb + 16 * q), hi = M64(tb + 16 * q + 8);
+        u32 nl = (u32)(lo & 0x7FFF), nreg = (u32)(lo >> 60) & 15, flg = (u32)(lo >> 58) & 3;
+        if (!nreg) nreg = 16;
+        if (flg != 0 || ((lo >> 46) & 1) || (lo & 0x03FF7FFF0000ull)) return 0;   /* (PACKED, no PRE, nothing else in the tag) */
+        for (u32 k = 0; k < nreg; k++) if (((hi >> (4 * k)) & 15) != 0xE) return 0;
+        u32 n = nl * nreg;
+        if (q + 1 + n > qwc || n > 64) return 0;
+        if (write) {
+            u32 op[4] = { 3, 0, 0, 0 };
+            rec_raw(op);
+            u32 ad[64]; u64 va[64];
+            for (u32 k = 0; k < n; k++) { va[k] = M64(tb + 16 * (q + 1 + k)); ad[k] = (u32)M64(tb + 16 * (q + 1 + k) + 8) & 0xFF; }
+            /* runs of writes as settings where they are; the others as register writes, in order */
+            u32 k = 0;
+            while (k < n) {
+                u32 o = ring_at;
+                if (ring_at + 64 > R_QW) { rb_ok = 0; return 0; }
+                if (nd_pack_regs(ad + k, va + k, 1, ring, &o, R_QW)) { ring_at = o; k++; continue; }
+                op[0] = 1; op[1] = ad[k]; op[2] = (u32)va[k]; op[3] = (u32)(va[k] >> 32); rec_raw(op); k++;
+            }
+        }
+        q += 1 + n;
+    }
+    return q == qwc;
+}
+/* the VIF word before the DIRECT: a NOP or a flush (FLUSHE, FLUSH, FLUSHA: waits only, nothing here) */
+static int vif_wait_only(u32 w) { return w == 0 || w == 0x10000000u || w == 0x11000000u || w == 0x13000000u; }
+/* the REF (or CNT) at T: 1 if it sends such a table (its record made when write) */
+static int stab_one(u32 T, u32 E, int write)
+{
+    u32 tag = M32(T), qwc = tag & 0xFFFF;
+    if (((tag & 0xFFFF0000u) == 0x10000000u) && !M32(T + 4) && vif_wait_only(M32(T + 8)) && M32(T + 12) == (0x50000000u | qwc) && qwc && qwc <= 64 && T + 16 * (qwc + 1) <= E) {
+        /* a CNT: the table follows its tag in the chain */
+        if (!stab_parse(T + 16, qwc, 0)) return 0;
+        if (!write) return 1;
+        if (ring_at + 512 > R_QW) ring_at = 0;
+        rec_begin();
+        if (!stab_parse(T + 16, qwc, 1)) { rb_ok = 0; return 0; }
+        return rec_end(T, T + 16 * (qwc + 1));
+    }
+    if ((tag & 0xFFFF0000u) != 0x30000000u || !qwc || qwc > 64 || !vif_wait_only(M32(T + 8)) || M32(T + 12) != (0x50000000u | qwc) || T + 16 > E) return 0;
+    u32 tb = M32(T + 4);
+    if (tb < 0x100000u || tb + qwc * 16 > 0x2000000u || (tb & 15)) return 0;
+    if (!stab_parse(tb, qwc, 0)) return 0;
+    if (!write) return 1;
+    if (ring_at + 512 > R_QW) ring_at = 0;
+    rec_begin();
+    if (!stab_parse(tb, qwc, 1)) { rb_ok = 0; return 0; }
+    rec_snapshot(tb, qwc);
+    return rec_end(T, T + 16);
+}
 void uya_texdma_exit(RcCtx *c)
 {
     u32 ra = (u32)c->r[31].d[0];
@@ -1397,7 +1465,7 @@ void uya_texdma_exit(RcCtx *c)
     while (d >= 0 && up_ra[d] != ra) d--;
     if (d < 0) return;
     up_depth = d; up_exits++;
-    if (!nupl_on()) return;
+    if (!nupl_on() && !nstab_on()) return;
     u32 cw = 0, T = 0;
     for (int k = 0; k < 3; k++) { u32 e = M32(up_cws[k]); if (e > up_t0[d][k] && e - up_t0[d][k] < 0x100000u && !(up_t0[d][k] & 15) && chain_word_ok(up_cws[k])) { if (cw) return; cw = up_cws[k]; T = up_t0[d][k]; } }
     u32 E = cw ? M32(cw) : 0;
@@ -1409,7 +1477,8 @@ void uya_texdma_exit(RcCtx *c)
     while (T < E) {
         u32 tag = M32(T), nx;
         if (tag == 0x20000000u && M32(T + 8) == NATIVE_2D_MARK && M32(T + 4) > T && M32(T + 4) <= E) { T = M32(T + 4); continue; }   /* (a record already) */
-        if (upl_one(T, E, &nx, 0)) { if (upl_one(T, E, &nx, 1)) up_made++; else up_other++; T = nx; continue; }
+        if (nupl_on() && upl_one(T, E, &nx, 0)) { if (upl_one(T, E, &nx, 1)) up_made++; else up_other++; T = nx; continue; }
+        if ((tag >> 28 & 7) == 1 && nstab_on() && stab_one(T, E, 0)) { u32 n_ = T + 16 * ((tag & 0xFFFF) + 1); if (stab_one(T, E, 1)) st_made++; else st_other++; T = n_; continue; }
         if ((tag >> 28 & 7) == 1 && M32(T + 4) == 0) {   /* (a CNT of another kind: as it is) */
             {   /* testing: UYA_NUPLLOG=1 logs a few of these that hold an IMAGE tag */
                 static int on = -1, left = 8; if (on < 0) on = getenv("UYA_NUPLLOG") != 0;
@@ -1421,11 +1490,15 @@ void uya_texdma_exit(RcCtx *c)
             }
             T += 16 * ((tag & 0xFFFF) + 1); up_other++; continue;
         }
-        if ((tag >> 28 & 7) == 3) { T += 16; up_other++; continue; }   /* (a REF of another kind) */
+        if ((tag >> 28 & 7) == 3) {
+            if (nstab_on() && stab_one(T, E, 0)) { if (stab_one(T, E, 1)) st_made++; else st_other++; T += 16; continue; }
+            T += 16; up_other++; continue;   /* (a REF of another kind) */
+        }
         if ((tag >> 28 & 7) == 2 && (tag & 0xFFFF) == 0) { T += 16; continue; }   /* (a NEXT: the packets written after it are converted where they are) */
         { static int t; if (t < 3) { t++; uya_log("native texture uploads: tag %08X %08X %08X %08X at %08X: the rest as it is", tag, M32(T + 4), M32(T + 8), M32(T + 12), T); } }
         break;
     }
-    static unsigned long long next = 1;
+    static unsigned long long next = 1, snext = 1;
     if (up_made >= next) { next = next < 100000 ? next * 10 : next + 100000; uya_log("native texture uploads: %llu as host records, %llu other packets", up_made, up_other); }
+    if (st_made >= snext) { snext = snext < 100000 ? snext * 10 : snext + 100000; uya_log("native GS state tables: %llu as host records, %llu not made", st_made, st_other); }
 }

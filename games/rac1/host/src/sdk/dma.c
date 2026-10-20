@@ -150,7 +150,8 @@ s32 uyafn_12D938(void *chan, void *tag)
                 fprintf(wt, "%08X record %04X %u\n", t, mk, q[3]);
             else if (id == 1 && qwc == 0 && (q[2] == NATIVE_STRIP_MARK || q[2] == NATIVE_TSTART_MARK || q[2] == NATIVE_TIE_MARK || q[2] == NATIVE_SSTART_MARK || q[2] == NATIVE_SHRUB_MARK || q[2] == NATIVE_SHRUB_DECMARK))
                 fprintf(wt, "%08X record %08X %u\n", t, q[2], q[3]);
-            else fprintf(wt, "%08X tag %u qwc %u addr %08X vif %08X %08X%s\n", t, id, qwc, addr, q[2], q[3], irq ? " irq" : "");
+            else { u32 uya_cw_owner(u32, u32 *); u32 st_ = 0, ow_ = uya_cw_owner(t, &st_);
+                   fprintf(wt, "%08X tag %u qwc %u addr %08X vif %08X %08X%s by %08X from %08X\n", t, id, qwc, addr, q[2], q[3], irq ? " irq" : "", ow_, st_); }
         }
         u32 next = 0;
         int end = 0;

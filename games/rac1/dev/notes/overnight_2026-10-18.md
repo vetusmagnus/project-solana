@@ -642,3 +642,18 @@ C. The walker removed; the DMA interrupt the game's chain sync waits on becomes 
   not identified yet, and a few REF tables from writers not hooked yet (levels 1: 0x1CAF00 7 qwords;
   9: 0x16EB20 9, 0x1CB6F0 3; 13: 0x1CAD80 7). And the VU-fed producers' data: 211-757 UNPACK and
   77-272 MSCAL packets a frame: step A's second part, the larger one.
+
+## Step A, the VU-fed data: only the software renderer's (19 October, night)
+
+- Who writes the UNPACK/MSCAL packets (chain-watch tree, one frame): the native TieProc (func_00236F00)
+  and TfragProc (func_002352C8) themselves: level 3 54 + 17 and 14 + 13, level 6 733 + 161 and 24 + 23.
+  That was a software-renderer run: there the native producers put their clip parts (and tfrag's) into
+  the chain for the VU programs (the software renderer has no mesh clipping), as their logs say ("the
+  clip part goes into the chain (not the GPU renderer...)").
+- On the GPU (the Windows build, UYA_WALKTRACE, one frame at vsync 1450): no UNPACK, MSCAL or MPG at all
+  on levels 1, 3, 6, 9, 13, 17; what is left as data is 4-15 DIRECT packets a frame (level 1 8, 3 4,
+  6 15, 9 11, 13 4, 17 13): the leftovers of the state tables' step (native flushes, CNT 5 packets,
+  tables from writers not hooked).
+- So for the GPU renderer step A ends with those leftovers; the VU-fed data is the software
+  renderer's path only (its clip parts through the VU programs' native code), a question for whether
+  the walker should also go from the software (reference) renderer.

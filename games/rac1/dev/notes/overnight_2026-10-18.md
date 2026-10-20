@@ -774,3 +774,12 @@ C. The walker removed; the DMA interrupt the game's chain sync waits on becomes 
 - Cost: on the GPU, a run of level 6 / 15 takes the same time with the list as without (about 15 s).
 - Checks of the default against UYA_HL=0: software, all 19 levels: 0 px (every run drew all its items from
   the list, 0 not in it); boot frames 150-400: 0 px; GPU levels 1, 3, 5, 9, 13: 0 px.
+
+## Build speed (20 October; asked from a side session)
+
+- build.py: the levels' generation in parallel (a.j at once, each level's gen_host.py then recomp.py in
+  order, level_info in level order, progress counting completions); compile jobs largest source first
+  (the 12-18k-line translated functions took ~100 s each and started last), link order unchanged.
+- dev/scripts/clean_build_time.sh DIR LOG [JOBS]: a clean build (what the launcher deletes, plus empty
+  zig caches) timed by phase. Linux, 19 levels, -j 20: 885 s -> 420 s (generation 147 -> 50 s, compile
+  723 -> 356 s); gen/ byte-identical (5,607 files), the binary identical without debug info.
